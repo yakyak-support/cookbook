@@ -61,6 +61,12 @@ run (by hand or on a daily cron). Each run does **source → render → (optiona
 post**, and a self-heal step makes sure the campaign it renders into is owned by
 *your* token. The five steps below take you from zero to a published episode.
 
+> **📺 Screen walk-throughs** — the same flow, click by click in screenshots:
+> - [**Horoscopes**](../docs/walkthrough-horoscopes.md) — fork → add your PAT →
+>   enable Actions → (what a missing PAT looks like) → rendered movie on yakyak.ai.
+> - [**DailyPull**](../docs/walkthrough-dailypull.md) — add your own AI (Claude OAuth
+>   token) → add the secret → monitor prep + render → soundtrack finishes it → enjoy.
+
 ### 1. Fork the repo
 
 Click **Fork** on GitHub to get your own copy — it comes with the shows, the
