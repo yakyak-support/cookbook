@@ -24,7 +24,7 @@ That's exactly what this cookbook unlocks: recipes, client libraries, and a prod
 **showrunner** for driving the whole YakYak pipeline — **source → render → post** —
 programmatically.
 
-### Best way in: the shows
+### Fast track your lift-off 🚀🚀🚀: Follow our click by click guide to Autonomous Shows 
 
 Start with **[`show/README.md`](show/README.md)**. Each "show" is a self-contained
 channel — a premise, a recurring cast, and a way of *sourcing* each episode's story —
@@ -60,6 +60,11 @@ Please:
    compute.* or prompt.md story source.
 4. Walk me through running it and wiring up my YakYak token.
 ```
+
+Here's that prompt running in Claude Code — it reads the docs, studies the two
+template shows, and scaffolds a new one for you:
+
+![Claude Code working through the "build my own show" prompt — reading the cookbook docs and examining the Horoscopes and PettyCourt template shows](docs/assets/claude-code-new-show-prompt.png)
 
 ## Reference
 

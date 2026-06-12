@@ -1,4 +1,4 @@
-# show
+# How to run Autonomous Shows
 
 Production **showrunner** for [YakYak](https://yakyak.ai/) channels, plus a gallery
 of example shows. Each show is a self-contained channel — a campaign, a recurring
