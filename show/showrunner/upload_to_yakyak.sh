@@ -335,6 +335,32 @@ switch_campaign_mode() {
     >/dev/null
 }
 
+# Switch to basic and CONFIRM it took. switch-campaign-mode is OWNER-LOCKED: a
+# non-owner PAT 403s, leaving the campaign in 'pro' so the scene auto-chain never
+# fires and the poll below hangs forever. The 200 response echoes the new mode,
+# so assert it == basic (a 403 yields an empty body → mismatch). Retries once.
+ensure_basic_mode() {
+  local resp mode attempt
+  for attempt in 1 2; do
+    resp="$(curl -fsS -X POST "$API/workflow/switch-campaign-mode" \
+      -H "$AUTH_H" -H 'Content-Type: application/json' \
+      --data "$(jq -nc --arg c "$CAMPAIGN_ID" '{campaignId:$c, mode:"basic"}')" 2>/dev/null || true)"
+    mode="$(jq -r '.mode // empty' <<<"$resp" 2>/dev/null || true)"
+    [[ "$mode" == "basic" ]] && return 0
+  done
+  return 1
+}
+
+# Nudge a movie's pipeline to advance its next incomplete step (mode- and
+# season-independent). Re-kicks a render that stalled or had a step fail mid-run;
+# the server re-dispatches/resumes from resolved inputs. Best-effort.
+resume_movie() {
+  curl -fsS -X POST "$API/workflow/resume" \
+    -H "$AUTH_H" -H 'Content-Type: application/json' \
+    --data "$(jq -nc --arg m "$1" '{movieId:$m}')" \
+    >/dev/null 2>&1 || true
+}
+
 # EXIT trap: return the campaign to 'pro' so it goes back to its manual-editing
 # default once the run ends — on success OR error. Only fires if we actually
 # switched to 'basic'. The script blocks on render completion, so by the time it
@@ -430,12 +456,13 @@ lookup_movie_in_campaign() {
 # --post-only doesn't render, so it doesn't need basic mode (skip the flip).
 SWITCHED_TO_BASIC=false
 if [[ "$POST_ONLY" != true ]]; then
-  if switch_campaign_mode basic; then
+  if ensure_basic_mode; then
     SWITCHED_TO_BASIC=true
     echo "→ Campaign mode → basic (auto-chain enabled for this run)"
     trap restore_pro_mode EXIT
   else
-    echo "⚠️  Could not switch campaign to basic — render may hang in pro mode" >&2
+    echo "error: could not enable basic mode — campaign still pro; check that the PAT owns campaign $CAMPAIGN_ID" >&2
+    exit 1
   fi
 fi
 
@@ -678,15 +705,22 @@ if [[ "$SKIP_FINALIZE" == true ]]; then
   exit 0
 fi
 
-# ---- wait for all scenes to finish (image → movie → subtitle → burn) -----
+# ---- drive all scenes to a burned state (image → movie → subtitle → burn) --
 #
 # A scene is "ready for concat" when sceneBurnSubtitle.status == "completed".
-# If any sceneBurnSubtitle ends up "failed", we abort — there's nothing the
-# soundtrack/render steps can do about a missing scene.
+# Rather than hard-fail on a single stuck/failed scene (which a deploy/restart
+# can cause mid-render, even though the server then self-recovers), detect stalls
+# and re-kick the pipeline — mirrors setup_show.sh's drive-loop:
+#   - progress is measured across ALL four scene phases (subtitle/image/movie/
+#     burn), not just burns, so a stall at any phase is detected;
+#   - on a real stall OR any 'failed' step, re-assert basic mode (in case it was
+#     switched) AND resume the movie;
+#   - bail only when the overall poll window is exhausted.
 
 echo "→ Waiting for scene generation (poll every ${SCENE_POLL_INTERVAL}s, up to $((SCENE_POLL_INTERVAL*SCENE_POLL_MAX/60)) min)…"
 
 SCENES_READY=false
+last_prog=-1; stall=0
 for i in $(seq 1 "$SCENE_POLL_MAX"); do
   sleep "$SCENE_POLL_INTERVAL"
   MOVIE_JSON="$(curl -fsS -H "$AUTH_H" "$API/workflow/get-movie/$MOVIE_ID" || true)"
@@ -695,26 +729,30 @@ for i in $(seq 1 "$SCENE_POLL_MAX"); do
     continue
   fi
 
-  SCENE_COUNT="$(jq -r '.scene | length' <<<"$MOVIE_JSON")"
+  SCENE_COUNT="$(jq -r '(.scene // []) | length' <<<"$MOVIE_JSON" 2>/dev/null || echo 0)"
   if [[ "$SCENE_COUNT" == "0" ]]; then
     echo "  …poll $i/${SCENE_POLL_MAX}: screenplay not yet generated"
     continue
   fi
 
-  FAILED="$(jq -r '[.scene[].sceneBurnSubtitle.status // "" | select(. == "failed")] | length' <<<"$MOVIE_JSON")"
-  if [[ "$FAILED" != "0" ]]; then
-    echo "error: $FAILED scene(s) failed in sceneBurnSubtitle. Investigate before rendering." >&2
-    exit 1
-  fi
-
-  DONE="$(jq -r '[.scene[].sceneBurnSubtitle.status // "" | select(. == "completed")] | length' <<<"$MOVIE_JSON")"
+  DONE="$(jq -r '[(.scene // [])[] | select((.sceneBurnSubtitle.status // "") == "completed")] | length' <<<"$MOVIE_JSON" 2>/dev/null || echo 0)"
+  # Completed steps across all four scene phases — the stall signal.
+  prog="$(jq -r '[(.scene // [])[] | (.sceneSubtitleMovie.status // ""),(.sceneImage.status // ""),(.sceneMovie.status // ""),(.sceneBurnSubtitle.status // "")] | map(select(. == "completed")) | length' <<<"$MOVIE_JSON" 2>/dev/null || echo 0)"
+  FAILED="$(jq -r '[(.scene // [])[] | select((.sceneBurnSubtitle.status // "") == "failed" or (.sceneImage.status // "") == "failed" or (.sceneMovie.status // "") == "failed")] | length' <<<"$MOVIE_JSON" 2>/dev/null || echo 0)"
+  echo "  …poll $i/${SCENE_POLL_MAX}: ${DONE}/${SCENE_COUNT} burned (steps $prog/$((SCENE_COUNT*4)), failed $FAILED)"
   if [[ "$DONE" == "$SCENE_COUNT" ]]; then
     SCENES_READY=true
     echo "  all $SCENE_COUNT scene(s) burned and ready"
     break
   fi
-
-  echo "  …poll $i/${SCENE_POLL_MAX}: ${DONE}/${SCENE_COUNT} scenes burned"
+  if [[ "$prog" -gt "$last_prog" ]]; then last_prog="$prog"; stall=0; else stall=$((stall+1)); fi
+  # Re-kick on a real stall, or immediately if something is in 'failed'.
+  if [[ "$stall" -ge 4 || "$FAILED" -gt 0 ]]; then
+    echo "  …stalled/failed — re-asserting basic mode + resume"
+    switch_campaign_mode basic || true
+    resume_movie "$MOVIE_ID"
+    stall=0
+  fi
 done
 
 if [[ "$SCENES_READY" != true ]]; then

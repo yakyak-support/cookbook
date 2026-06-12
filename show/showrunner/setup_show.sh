@@ -82,6 +82,22 @@ resume_movie() {
     -d "$(jq -n --arg mid "$1" '{movieId:$mid}')" \
     "$API/workflow/resume" >/dev/null 2>&1 || true
 }
+# Switch a campaign to basic and CONFIRM it took. set_campaign_mode is best-effort
+# (swallows errors), but switch-campaign-mode is OWNER-LOCKED — a non-owner PAT
+# 403s, leaving the campaign 'pro' so auto-chain never fires and the scene poll
+# hangs forever. The 200 response echoes the new mode, so assert it == basic (a
+# 403 yields an empty body → mismatch). Retries once; non-zero if it never took.
+ensure_basic_mode() {
+  local cid="$1" resp mode attempt
+  for attempt in 1 2; do
+    resp="$(curl -fsS -X POST "${AUTH[@]}" "${JSON[@]}" \
+      -d "$(jq -n --arg cid "$cid" '{campaignId:$cid, mode:"basic"}')" \
+      "$API/workflow/switch-campaign-mode" 2>/dev/null || true)"
+    mode="$(jq -r '.mode // empty' <<<"$resp" 2>/dev/null || true)"
+    [[ "$mode" == "basic" ]] && return 0
+  done
+  return 1
+}
 
 decode_user_id() {
   local pat="$1" jwt payload
@@ -259,7 +275,10 @@ else
   # campaign suppresses auto-chain entirely. So render in BASIC and kick the
   # scene pipeline explicitly via /workflow/resume (below). Restore PRO on exit.
   echo "  → campaign mode → basic (enables scene auto-chain)"
-  set_campaign_mode "$CAMPAIGN_ID" basic
+  ensure_basic_mode "$CAMPAIGN_ID" || {
+    echo "error: could not enable basic mode — campaign still pro; check that the PAT owns campaign $CAMPAIGN_ID" >&2
+    exit 1
+  }
   trap 'echo "→ restoring campaign mode → pro"; set_campaign_mode "$CAMPAIGN_ID" pro' EXIT
 
   # 5a. stamp the campaign prompt as the trailer plot (overwrites the imported

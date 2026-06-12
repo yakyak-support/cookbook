@@ -263,3 +263,56 @@ cp -r show/LuckyDay show/MyShow      # then edit show.env + campaign.import.json
 Repeat steps 4–5 whenever you want a new episode. To automate it later, wire those two
 commands into any scheduler you like (a local cron, a GitHub Action with `YAKYAK_PAT`
 as a secret, etc.) — the scripts are non-interactive-safe.
+
+---
+
+## How your fork gets engine bug fixes
+
+The showrunner is split into two layers, and that split is what determines how
+upstream fixes reach you:
+
+- **Engine** (`upload_to_yakyak.{py,js,sh}`, `story-format.js`, `prepare.sh`,
+  `setup_show.sh`, `ensure_owned_campaign.sh`) — the show-agnostic machinery. This
+  is baked **into** the Docker images.
+- **Show content** (`show.env`, `prompt.md`, `compute.*`, `campaign.import.json`) —
+  everything specific to *your* show. CI mounts this from your checkout **over** the
+  baked copy at runtime, so your show dirs always come from your repo, never the image.
+
+How you receive a fix depends on how you run the engine:
+
+### If you run via CI / Docker (recommended)
+
+You get engine fixes **automatically, without touching your repo**. The scheduled
+[`run-shows.yml`](../../.github/workflows/run-shows.yml) pulls the engine images from
+upstream's Docker Hub namespace (`yakyaksdk/showrunner-{py,js,sh,prepare}`) on every
+run — anonymously, so you need no Docker credentials. When upstream ships a fix and
+publishes a new image, your next scheduled run does a fresh `docker pull` and is now
+running the patched engine. Because your checkout only supplies show content (which is
+yours anyway), there is nothing to merge and no conflict to resolve.
+
+Two things to know:
+
+- **`latest` auto-tracks; a pinned tag freezes.** `run-shows.yml` pulls the tag in the
+  `SHOWRUNNER_TAG` repo variable, defaulting to `latest`. Leaving it on `latest` means
+  you ride upstream fixes as they publish. Pinning it to a specific version gives you
+  reproducible, roll-back-able runs — but then you stay on that engine until you bump
+  the pin yourself. You can't have both auto-patching and pinned reproducibility from
+  the same knob; choose per the trade-off you want.
+- **Upstream publishes manually.** `:latest` reflects the last time upstream published
+  an image, not the latest upstream commit — so a just-merged fix reaches you only once
+  it's been published.
+
+### If you run locally from your checkout (no Docker)
+
+The Docker channel doesn't apply — you're running the engine scripts straight from your
+files. Your only fix channel is **merging from upstream** (`git pull` / merge the
+upstream remote). As long as you've customized *only* your show dirs under `show/` and
+left the engine (`show/showrunner/**`) untouched, those merges stay clean.
+
+### Don't edit the engine in your fork
+
+If you modify `show/showrunner/**` in your checkout, you break both channels: Docker
+runs silently ignore your edits (the baked image wins for engine code — only show dirs
+are mounted over it), and you'll hit merge conflicts pulling upstream fixes. Keep all
+your customization in your show directory; if you think the engine itself needs a
+change, it's worth proposing upstream so every fork benefits.

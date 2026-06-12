@@ -263,6 +263,17 @@ class YakYak:
             )
         )
 
+    def resume_movie(self, movie_id: str) -> None:
+        """Nudge a movie's pipeline to advance its next incomplete step (mode-
+        and season-independent). Used to re-kick a render that stalled or had a
+        step fail mid-run — the server re-dispatches/resumes from resolved
+        inputs. Best-effort: tolerate non-2xx (e.g. lease_denied when a render
+        is genuinely in flight); the next poll re-evaluates."""
+        try:
+            self._request("POST", "/workflow/resume", {"movieId": movie_id})
+        except Exception as e:  # noqa: BLE001 — best effort, never abort the run
+            print(f"  ⚠️  resume nudge failed: {e}", file=sys.stderr)
+
     def template_movie_id(self) -> Optional[str]:
         """The campaign's template (season==null) movie id, via list-campaign.
 
@@ -756,17 +767,31 @@ def main(argv: list[str]) -> int:
     # 'basic' makes the render pipeline auto-chain; 'pro' stops after the
     # screenplay for manual UI stepping. We need 'basic' to run unattended, and
     # restore 'pro' on exit (success OR error). --post-only doesn't render.
+    #
+    # switch-campaign-mode is OWNER-LOCKED: a non-owner PAT 403s. If we limped on
+    # in 'pro' the scene auto-chain never fires and the wait gate hangs forever,
+    # so verify the switch took (the call raises on 403) — retry once, then abort
+    # with an actionable error rather than hang later.
     switched_to_basic = False
     if not args.post_only:
-        try:
-            yy.switch_campaign_mode("basic")
-            switched_to_basic = True
-            print("→ Campaign mode → basic (auto-chain enabled for this run)")
-        except Exception as e:  # noqa: BLE001 — best effort, mirror shell
+        for attempt in (1, 2):
+            try:
+                yy.switch_campaign_mode("basic")
+                switched_to_basic = True
+                break
+            except Exception as e:  # noqa: BLE001
+                print(
+                    f"⚠️  Could not switch campaign to basic (attempt {attempt}/2): {e}",
+                    file=sys.stderr,
+                )
+        if not switched_to_basic:
             print(
-                f"⚠️  Could not switch campaign to basic — render may hang in pro mode ({e})",
+                "error: could not enable basic mode — campaign still pro; check "
+                f"that the PAT owns campaign {args.campaign_id}",
                 file=sys.stderr,
             )
+            return 1
+        print("→ Campaign mode → basic (auto-chain enabled for this run)")
 
     try:
         return run(yy, args, story_file, cdn_base)
@@ -914,10 +939,26 @@ def upload_and_render(
         print(f"  Preview:  https://yakyak.ai/export?movieId={movie_id}")
         sys.exit(0)
 
-    # ---- wait for all scenes to finish ------------------------------------
+    # ---- drive all scenes to a burned state -------------------------------
+    # A scene is ready when sceneBurnSubtitle.status == "completed". Rather than
+    # hard-fail on a single stuck/failed scene (which a deploy/restart can cause
+    # mid-render, even though the server then self-recovers), detect stalls and
+    # re-kick the pipeline — mirrors setup_show.sh's drive-loop:
+    #   - progress is measured across ALL four scene phases (subtitle/image/
+    #     movie/burn), not just burns, so a stall at any phase is detected;
+    #   - on a real stall (no progress for several polls) OR any 'failed' step,
+    #     re-assert basic mode (in case it was switched) AND resume the movie;
+    #   - bail only when the overall poll window is exhausted.
+    phases = ("sceneSubtitleMovie", "sceneImage", "sceneMovie", "sceneBurnSubtitle")
+
+    def _phase_status(scene: dict, phase: str) -> str:
+        return (scene.get(phase) or {}).get("status") or ""
+
     max_min = SCENE_POLL_INTERVAL * SCENE_POLL_MAX // 60
     print(f"→ Waiting for scene generation (poll every {SCENE_POLL_INTERVAL}s, up to {max_min} min)…")
     scenes_ready = False
+    last_prog = -1
+    stall = 0
     for i in range(1, SCENE_POLL_MAX + 1):
         time.sleep(SCENE_POLL_INTERVAL)
         movie = yy.get_movie(movie_id)
@@ -930,21 +971,37 @@ def upload_and_render(
             print(f"  …poll {i}/{SCENE_POLL_MAX}: screenplay not yet generated")
             continue
 
-        statuses = [(s.get("sceneBurnSubtitle") or {}).get("status") for s in scenes]
-        failed = sum(1 for st in statuses if st == "failed")
-        if failed:
-            print(
-                f"error: {failed} scene(s) failed in sceneBurnSubtitle. "
-                "Investigate before rendering.",
-                file=sys.stderr,
-            )
-            return 1
-        done = sum(1 for st in statuses if st == "completed")
+        done = sum(1 for s in scenes if _phase_status(s, "sceneBurnSubtitle") == "completed")
+        # Completed steps across all four scene phases — the stall signal.
+        prog = sum(1 for s in scenes for p in phases if _phase_status(s, p) == "completed")
+        failed = sum(
+            1
+            for s in scenes
+            if any(_phase_status(s, p) == "failed"
+                   for p in ("sceneBurnSubtitle", "sceneImage", "sceneMovie"))
+        )
+        print(
+            f"  …poll {i}/{SCENE_POLL_MAX}: {done}/{scene_count} burned "
+            f"(steps {prog}/{scene_count * 4}, failed {failed})"
+        )
         if done == scene_count:
             scenes_ready = True
             print(f"  all {scene_count} scene(s) burned and ready")
             break
-        print(f"  …poll {i}/{SCENE_POLL_MAX}: {done}/{scene_count} scenes burned")
+        if prog > last_prog:
+            last_prog = prog
+            stall = 0
+        else:
+            stall += 1
+        # Re-kick on a real stall, or immediately if something is in 'failed'.
+        if stall >= 4 or failed > 0:
+            print("  …stalled/failed — re-asserting basic mode + resume")
+            try:
+                yy.switch_campaign_mode("basic")
+            except Exception:  # noqa: BLE001 — best-effort re-assert
+                pass
+            yy.resume_movie(movie_id)
+            stall = 0
 
     if not scenes_ready:
         print(

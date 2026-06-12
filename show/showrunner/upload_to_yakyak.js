@@ -307,6 +307,19 @@ async function switchCampaignMode(mode) {
   await client.workflow.switchCampaignMode({ switchCampaignModeDto: { campaignId: CAMPAIGN_ID, mode } });
 }
 
+// Nudge a movie's pipeline to advance its next incomplete step (mode- and
+// season-independent). Used to re-kick a render that stalled or had a step fail
+// mid-run — the server re-dispatches/resumes from resolved inputs. Best-effort.
+async function resumeMovie(movieId) {
+  try {
+    await client.workflow.resumeMovie({ resumeMovieDto: { movieId } });
+  } catch (e) {
+    // lease_denied (a render is genuinely in flight) and transient errors are
+    // expected here — the next poll re-evaluates. Don't abort the run.
+    console.error(`  ⚠️  resume nudge failed: ${e?.message || e}`);
+  }
+}
+
 let switchedToBasic = false;
 let proRestored = false;
 async function restoreProMode() {
@@ -417,14 +430,26 @@ async function run() {
   }
 
   // ---- ensure auto-chain: basic during the run, pro restored on exit -------
+  // switch-campaign-mode is OWNER-LOCKED: a non-owner PAT 403s. If we limped on
+  // in 'pro' the scene auto-chain never fires and the wait gate hangs forever,
+  // so verify the switch actually took (the call throws on 403) — retry once,
+  // then abort with an actionable error rather than hang later.
   if (!POST_ONLY) {
-    try {
-      await switchCampaignMode('basic');
-      switchedToBasic = true;
-      console.log('→ Campaign mode → basic (auto-chain enabled for this run)');
-    } catch {
-      console.error('⚠️  Could not switch campaign to basic — render may hang in pro mode');
+    let basicOk = false;
+    for (const attempt of [1, 2]) {
+      try {
+        await switchCampaignMode('basic');
+        basicOk = true;
+        break;
+      } catch (e) {
+        console.error(`⚠️  Could not switch campaign to basic (attempt ${attempt}/2): ${e?.message || e}`);
+      }
     }
+    if (!basicOk) {
+      die(`could not enable basic mode — campaign still pro; check that the PAT owns campaign ${CAMPAIGN_ID}`);
+    }
+    switchedToBasic = true;
+    console.log('→ Campaign mode → basic (auto-chain enabled for this run)');
   }
 
   // ---- pick target episode -------------------------------------------------
@@ -548,12 +573,23 @@ async function run() {
       return;
     }
 
-    // ---- wait for all scenes to finish ------------------------------------
-    // A scene is ready when sceneBurnSubtitle.status == "completed". Any
-    // "failed" aborts — the soundtrack/render steps can't fix a missing scene.
+    // ---- drive all scenes to a burned state -------------------------------
+    // A scene is ready when sceneBurnSubtitle.status == "completed". Rather than
+    // hard-fail on a single stuck/failed scene (which a deploy/restart can cause
+    // mid-render, even though the server then self-recovers), detect stalls and
+    // re-kick the pipeline — mirrors setup_show.sh's drive-loop:
+    //   - progress is measured across ALL four scene phases (subtitle/image/
+    //     movie/burn), not just burns, so a stall at any phase is detected;
+    //   - on a real stall (no progress for several polls) OR any 'failed' step,
+    //     re-assert basic mode (in case it was switched) AND resume the movie;
+    //   - bail only when the overall poll window is exhausted.
+    const phaseStatus = (scene, phase) => scene?.[phase]?.status || '';
+    const PHASES = ['sceneSubtitleMovie', 'sceneImage', 'sceneMovie', 'sceneBurnSubtitle'];
     console.log(`→ Waiting for scene generation (poll every ${SCENE_POLL_INTERVAL}s, up to ${Math.floor(SCENE_POLL_INTERVAL * SCENE_POLL_MAX / 60)} min)…`);
 
     let scenesReady = false;
+    let lastProg = -1;
+    let stall = 0;
     for (let i = 1; i <= SCENE_POLL_MAX; i++) {
       await sleep(SCENE_POLL_INTERVAL);
       let movie;
@@ -568,17 +604,29 @@ async function run() {
         console.log(`  …poll ${i}/${SCENE_POLL_MAX}: screenplay not yet generated`);
         continue;
       }
-      const failed = scenes.filter((s) => s?.sceneBurnSubtitle?.status === 'failed').length;
-      if (failed !== 0) {
-        die(`${failed} scene(s) failed in sceneBurnSubtitle. Investigate before rendering.`);
-      }
-      const done = scenes.filter((s) => s?.sceneBurnSubtitle?.status === 'completed').length;
+      const done = scenes.filter((s) => phaseStatus(s, 'sceneBurnSubtitle') === 'completed').length;
+      // Completed steps across all four scene phases — the stall signal.
+      const prog = scenes.reduce(
+        (n, s) => n + PHASES.filter((p) => phaseStatus(s, p) === 'completed').length,
+        0,
+      );
+      const failed = scenes.filter((s) =>
+        ['sceneBurnSubtitle', 'sceneImage', 'sceneMovie'].some((p) => phaseStatus(s, p) === 'failed'),
+      ).length;
+      console.log(`  …poll ${i}/${SCENE_POLL_MAX}: ${done}/${scenes.length} burned (steps ${prog}/${scenes.length * 4}, failed ${failed})`);
       if (done === scenes.length) {
         scenesReady = true;
         console.log(`  all ${scenes.length} scene(s) burned and ready`);
         break;
       }
-      console.log(`  …poll ${i}/${SCENE_POLL_MAX}: ${done}/${scenes.length} scenes burned`);
+      if (prog > lastProg) { lastProg = prog; stall = 0; } else { stall += 1; }
+      // Re-kick on a real stall, or immediately if something is in 'failed'.
+      if (stall >= 4 || failed > 0) {
+        console.log('  …stalled/failed — re-asserting basic mode + resume');
+        try { await switchCampaignMode('basic'); } catch { /* best-effort re-assert */ }
+        await resumeMovie(MOVIE_ID);
+        stall = 0;
+      }
     }
 
     if (!scenesReady) {
