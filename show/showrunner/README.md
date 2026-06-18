@@ -177,6 +177,23 @@ Required CI secrets/vars:
 | `ANTHROPIC_API_KEY` | secret | only for prompt-kind shows' prepare step |
 | `SHOWRUNNER_TAG` | variable | pin runs to a known-good image SHA (default `latest`) |
 
+## Release process
+
+### SDK (when the API changes)
+1. Run `publish-sdks.yml` with the new version (e.g. `0.0.8`)
+2. Update `requirements.txt` and `package.json` to that version
+3. Run `npm install` in `show/showrunner/` to regenerate `package-lock.json`
+4. Commit + push all three files
+
+### Docker images (after SDK pins are updated, or any showrunner code change)
+1. Get the next version — no need to open Docker Hub, just run:
+   ```bash
+   curl -s "https://hub.docker.com/v2/repositories/yakyaksdk/showrunner-prepare/tags/?page_size=10&ordering=-last_updated" \
+     | python3 -c "import json,sys; tags=[t['name'] for t in json.load(sys.stdin)['results'] if t['name']!='latest']; print('latest:', tags[0])"
+   ```
+2. Make sure the SDK pin changes are pushed first — the Docker build COPYs `requirements.txt` and `package-lock.json` from the repo
+3. Run `publish-dockerhub.yml` with the new version
+
 ## Two non-interactive gates (cron/CI)
 
 Both ports are no-TTY safe. Unattended:
