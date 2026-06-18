@@ -40,7 +40,7 @@ jobs:
           - { name: sh,      dockerfile: show/showrunner/Dockerfile.sh }
           - { name: prepare, dockerfile: show/showrunner/Dockerfile.prepare }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Log in to Docker Hub
         if: ${{ !inputs.dry_run }}

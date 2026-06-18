@@ -42,7 +42,7 @@ jobs:
       matrix: ${{ steps.plan.outputs.matrix }}
       count: ${{ steps.plan.outputs.count }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - id: plan
         env:
           FORCE_SHOW: ${{ github.event.inputs.show }}
@@ -68,7 +68,7 @@ jobs:
       group: run-show-${{ matrix.show }}
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Compute image refs
         # SHOW_PATH is the runner-side checkout path (show/<Show>); SHOW is the
@@ -195,7 +195,7 @@ jobs:
         # back to the source repo. Runs even on render failure so a
         # successfully-prepared story is never lost.
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: story-${{ matrix.show }}
           path: ${{ env.SHOW_PATH }}/stories/

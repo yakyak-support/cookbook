@@ -44,7 +44,7 @@ jobs:
       group: run-show-${{ github.event.inputs.show }}
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Resolve show + engine
         # SHOW_PATH is the runner-side checkout path; SHOW (basename) is also the
