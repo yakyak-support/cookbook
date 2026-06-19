@@ -29,6 +29,31 @@ import json
 import sys
 
 
+def fix_datetime_field_clash(node):
+    """Strip format:'date-time' from any property literally named 'datetime'.
+
+    pydantic 2.11+ raises PydanticUserError('unevaluable-type-annotation') when
+    a field is named 'datetime' and typed as datetime.datetime — the name shadows
+    the type import in the class scope. openapi-generator emits that clash when a
+    property named 'datetime' carries format:'date-time'. Stripping the format
+    makes the generator emit StrictStr instead, which is wire-compatible (the value
+    is still an ISO-8601 string) and doesn't clash.
+    """
+    fixed = 0
+    if isinstance(node, dict):
+        props = node.get("properties", {})
+        if "datetime" in props and isinstance(props["datetime"], dict):
+            if props["datetime"].get("format") == "date-time":
+                del props["datetime"]["format"]
+                fixed += 1
+        for v in node.values():
+            fixed += fix_datetime_field_clash(v)
+    elif isinstance(node, list):
+        for item in node:
+            fixed += fix_datetime_field_clash(item)
+    return fixed
+
+
 def strip_schema_enums(node):
     """Recursively remove `enum` constraints anywhere under a schema subtree.
 
@@ -347,6 +372,12 @@ def main():
 
     schemas = spec.setdefault("components", {}).setdefault("schemas", {})
 
+    # 0a. Fix datetime field name clash (pydantic 2.11+ rejects a field named
+    #     'datetime' typed as datetime.datetime; strip format:'date-time' so the
+    #     generator emits StrictStr instead). Applied to the whole spec so it
+    #     catches both named schemas and inline requestBody schemas.
+    datetime_clashes = fix_datetime_field_clash(spec)
+
     # 1. Strip schema-level `examples` (3.1 leakage) from every defined schema.
     removed = strip_schema_examples(schemas)
 
@@ -388,6 +419,7 @@ def main():
         json.dump(spec, f, indent=2)
 
     print(f"patched spec written to {dst}")
+    print(f"  stripped format:date-time from {datetime_clashes} 'datetime'-named field(s)")
     print(f"  removed {removed} schema-level 'examples' key(s)")
     print(f"  removed {enums} schema-level 'enum' constraint(s)")
     print(f"  added body schema to {bodies} success response(s)")

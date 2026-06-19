@@ -11,6 +11,6 @@
     "upload": "node ./upload_to_yakyak.js"
   },
   "dependencies": {
-    "yakyak-sdk": "^0.0.8"
+    "yakyak-sdk": "^0.0.9"
   }
 }

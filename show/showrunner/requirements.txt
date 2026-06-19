@@ -8,7 +8,7 @@
 # 0.0.7+ models the request bodies the engine needs (switch-campaign-mode,
 # export-render, set-soundtrack-audio, set-movie-metadata.plot, …), so those
 # calls use the typed SDK methods instead of raw transport.
-yakyak-sdk==0.0.8
+yakyak-sdk==0.0.9
 
 # certifi gives us a guaranteed CA bundle so TLS verification works on a fresh
 # python.org macOS install without running "Install Certificates.command".
