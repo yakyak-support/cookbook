@@ -99,6 +99,20 @@ jobs:
           python -m build
           python -m twine check dist/*
 
+      # `twine check` validates packaging metadata but never imports the code, so
+      # a spec that generates a module which crashes at import time (e.g. a
+      # `datetime`-named date-time field -> pydantic FieldInfo clash) would sail
+      # through to PyPI and break every consumer at `import yakyak_sdk`. Install
+      # the built wheel into a clean venv and actually import it (the facade too)
+      # before publishing. Runs on dry runs as well.
+      - name: Smoke-import the built wheel before publishing
+        working-directory: sdk/python
+        run: |
+          python -m venv /tmp/sdk-smoke
+          /tmp/sdk-smoke/bin/python -m pip install --upgrade pip
+          /tmp/sdk-smoke/bin/python -m pip install dist/*.whl
+          /tmp/sdk-smoke/bin/python -c "import yakyak_sdk; from yakyak_sdk import YakYakClient; print('OK: import yakyak_sdk + YakYakClient')"
+
       - name: Publish to PyPI
         if: ${{ github.event.inputs.dry_run != 'true' }}
         working-directory: sdk/python
