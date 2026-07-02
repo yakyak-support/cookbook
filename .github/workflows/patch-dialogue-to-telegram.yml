@@ -1,0 +1,61 @@
+# GitHub → n8n → engine → YakYak → Telegram.
+#
+# The educational sibling of render-to-telegram.yml: instead of just rendering,
+# this one CHANGES the movie first — it sends a new dialogue line for one scene
+# to the n8n front-end (integrations/n8n/workflow.patch-dialogue-to-telegram.json),
+# which delegates to the generic engine (workflow.import-regen-post.json,
+# webhook /yakyak-regen) in patch mode. The engine applies update-scene-dialogue
+# (regenerating that scene's subtitle + burn), re-renders, and the front-end
+# delivers the finished video to Telegram.
+#
+# Re-running with the SAME dialogue is a free no-op: the engine is diff-aware,
+# so only the final re-concat happens.
+#
+# Secrets required (repo Settings → Secrets and variables → Actions):
+#   N8N_PATCH_WEBHOOK_URL — e.g. https://n8n.yakyak.ai/webhook/yakyak-patch-telegram
+#   N8N_RENDER_TOKEN      — same shared secret as render-to-telegram.yml
+name: Patch dialogue → render → Telegram
+
+on:
+  workflow_dispatch:
+    inputs:
+      dialogue:
+        description: "New dialogue line for the scene (don't end it with a period)"
+        required: true
+      movieId:
+        description: "YakYak movie id (IG grid ?movieId=…)"
+        required: true
+        default: "acffd965-e17f-4d14-9273-72858d7e38fd"
+      sceneNumber:
+        description: "1-based scene number to change"
+        required: true
+        default: "1"
+
+jobs:
+  patch-render-send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Trigger n8n patch pipeline
+        env:
+          N8N_PATCH_WEBHOOK_URL: ${{ secrets.N8N_PATCH_WEBHOOK_URL }}
+          N8N_RENDER_TOKEN: ${{ secrets.N8N_RENDER_TOKEN }}
+          # Inputs go through env (not inline interpolation) so quotes/backticks
+          # in the dialogue can't break — or inject into — the shell command.
+          DIALOGUE: ${{ inputs.dialogue }}
+          MOVIE_ID: ${{ inputs.movieId }}
+          SCENE_NUMBER: ${{ inputs.sceneNumber }}
+        run: |
+          if [ -z "$N8N_PATCH_WEBHOOK_URL" ]; then
+            echo "::error::N8N_PATCH_WEBHOOK_URL secret is not set" && exit 1
+          fi
+          body=$(jq -n --arg m "$MOVIE_ID" --arg d "$DIALOGUE" --arg s "$SCENE_NUMBER" \
+            '{movieId: $m, dialogue: $d, sceneNumber: ($s | tonumber)}')
+          echo "→ patching scene $SCENE_NUMBER of $MOVIE_ID"
+          resp=$(curl -sS --fail-with-body --max-time 1800 \
+            -X POST "$N8N_PATCH_WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -H "x-render-token: $N8N_RENDER_TOKEN" \
+            -d "$body")
+          echo "$resp"
+          echo "$resp" | python3 -c "import json,sys; d=json.load(sys.stdin); print('::notice::scene %s %s; delivered as %s: %s' % (d.get('sceneNumber'), 'updated' if d.get('changed') else 'unchanged (no-op)', d.get('delivered'), d.get('url')))"
