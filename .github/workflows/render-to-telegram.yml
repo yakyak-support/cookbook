@@ -1,0 +1,51 @@
+# GitHub → n8n → YakYak → Telegram.
+#
+# This action is a thin trigger: it POSTs to the n8n workflow
+# integrations/n8n/workflow.render-to-telegram.json, which renders the movie,
+# collects the finished video, and delivers it to Telegram. The curl blocks
+# until n8n responds (i.e. until the render is done and delivered).
+#
+# Secrets required (repo Settings → Secrets and variables → Actions):
+#   N8N_WEBHOOK_URL     — the workflow's PUBLIC production webhook URL, e.g.
+#                         https://<your-n8n-host>/webhook/yakyak-render-telegram
+#                         (GitHub runners cannot reach localhost — see
+#                         integrations/telegram/README.md for tunnel options)
+#   N8N_RENDER_TOKEN    — shared secret; must match RENDER_WEBHOOK_TOKEN on the
+#                         n8n instance (the webhook triggers paid renders)
+#
+# YakYak + Telegram credentials live on the n8n instance, NOT here.
+name: Render movie → Telegram
+
+on:
+  workflow_dispatch:
+    inputs:
+      movieId:
+        description: "YakYak movie id to render (IG grid ?movieId=…)"
+        required: true
+        default: "acffd965-e17f-4d14-9273-72858d7e38fd"
+      force:
+        description: "Force a fresh concat even if nothing changed"
+        type: boolean
+        default: true
+
+jobs:
+  trigger-n8n:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Trigger n8n render pipeline
+        env:
+          N8N_WEBHOOK_URL: ${{ secrets.N8N_WEBHOOK_URL }}
+          N8N_RENDER_TOKEN: ${{ secrets.N8N_RENDER_TOKEN }}
+        run: |
+          if [ -z "$N8N_WEBHOOK_URL" ]; then
+            echo "::error::N8N_WEBHOOK_URL secret is not set" && exit 1
+          fi
+          echo "→ triggering n8n render of ${{ inputs.movieId }} (force=${{ inputs.force }})"
+          resp=$(curl -sS --fail-with-body --max-time 1800 \
+            -X POST "$N8N_WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -H "x-render-token: $N8N_RENDER_TOKEN" \
+            -d "{\"movieId\": \"${{ inputs.movieId }}\", \"force\": ${{ inputs.force }}}")
+          echo "$resp"
+          echo "$resp" | python3 -c "import json,sys; d=json.load(sys.stdin); print('::notice::delivered as %s: %s - %s' % (d.get('delivered'), d.get('title'), d.get('url')))"
