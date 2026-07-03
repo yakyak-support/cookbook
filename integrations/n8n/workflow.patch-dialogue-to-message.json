@@ -1,14 +1,22 @@
 {
   "name": "YakYak — patch scene dialogue via engine, deliver message",
-  "meta": { "templateCredsSetupCompleted": false },
-  "settings": { "executionOrder": "v1", "executionTimeout": 3600 },
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "executionTimeout": 3600
+  },
   "nodes": [
     {
       "id": "trigger",
       "name": "Patch request",
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2,
-      "position": [0, 300],
+      "position": [
+        0,
+        300
+      ],
       "webhookId": "yakyak-patch-message",
       "parameters": {
         "httpMethod": "POST",
@@ -29,10 +37,13 @@
       "name": "Validate",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [200, 300],
+      "position": [
+        200,
+        300
+      ],
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "// Gate + shape. This is deliberately ALL this workflow does itself — the\n// change/render heavy lifting is delegated to the engine sub-workflow\n// (workflow.yakyak-engine.json) two nodes down. The webhook token check that\n// used to live here is now the webhook node's Header Auth credential.\nconst body = $('Patch request').first().json.body || {};\nif (!body.movieId) throw new Error('body.movieId is required (the ?movieId= param on the IG grid)');\nlet dialogue = String(body.dialogue || '').trim();\nif (!dialogue) throw new Error('body.dialogue is required');\n// YakYak convention: dialogue must not end in a period (\"!\" / \"?\" are fine)\ndialogue = dialogue.replace(/\\.+$/, '');\nconst sceneNumber = Number(body.sceneNumber || 1);\nif (!Number.isInteger(sceneNumber) || sceneNumber < 1) throw new Error('body.sceneNumber must be a positive integer');\n// Routing: one shape for every channel. Each bot credential can post anywhere,\n// so the destination travels with the request; a present key = deliver there.\nconst dt = body.deliverTo || {};\nconst deliverTo = {\n  telegram: String(dt.telegram || '').trim(),\n  discord: String(dt.discord || '').trim(),\n  slack: String(dt.slack || '').trim(),\n};\nif (!deliverTo.telegram && !deliverTo.discord && !deliverTo.slack) {\n  throw new Error('deliverTo must name at least one channel, e.g. {\"deliverTo\":{\"telegram\":\"175991…\",\"discord\":\"138512…\",\"slack\":\"C0BF…\"}}');\n}\nreturn [{ json: { movieId: body.movieId, dialogue, sceneNumber, deliverTo } }];"
+        "jsCode": "// Gate + shape. This is deliberately ALL this workflow does itself — the\n// change/render heavy lifting is delegated to the engine sub-workflow\n// (workflow.yakyak-engine.json) two nodes down. The webhook token check that\n// used to live here is now the webhook node's Header Auth credential.\nconst body = $('Patch request').first().json.body || {};\nif (!body.movieId) throw new Error('body.movieId is required (the ?movieId= param on the IG grid)');\n// dialogue is OPTIONAL: omit it for render-only mode — no edit, the engine\n// just resolves the movie, re-renders, and the video is delivered as usual.\nlet dialogue = String(body.dialogue || '').trim();\n// YakYak convention: dialogue must not end in a period (\"!\" / \"?\" are fine)\ndialogue = dialogue.replace(/\\.+$/, '');\nconst renderOnly = !dialogue;\nconst sceneNumber = Number(body.sceneNumber || 1);\nif (!renderOnly && (!Number.isInteger(sceneNumber) || sceneNumber < 1)) throw new Error('body.sceneNumber must be a positive integer');\n// Routing: one shape for every channel. Each bot credential can post anywhere,\n// so the destination travels with the request; a present key = deliver there.\nconst dt = body.deliverTo || {};\nconst deliverTo = {\n  telegram: String(dt.telegram || '').trim(),\n  discord: String(dt.discord || '').trim(),\n  slack: String(dt.slack || '').trim(),\n};\nif (!deliverTo.telegram && !deliverTo.discord && !deliverTo.slack) {\n  throw new Error('deliverTo must name at least one channel, e.g. {\"deliverTo\":{\"telegram\":\"175991…\",\"discord\":\"138512…\",\"slack\":\"C0BF…\"}}');\n}\nreturn [{ json: { movieId: body.movieId, dialogue, sceneNumber, renderOnly, deliverTo } }];"
       }
     },
     {
@@ -40,10 +51,13 @@
       "name": "Build engine payload",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [400, 300],
+      "position": [
+        400,
+        300
+      ],
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "// The engine's sub-workflow trigger is passthrough: this item has the same\n// shape as the engine webhook's body. movieId alone is enough — the engine\n// derives the campaign from the movie, so no userId needed on this path.\nconst v = $json;\nreturn [{ json: { target: { mode: 'patch', movieId: v.movieId }, changes: { scenes: [{ sceneNumber: v.sceneNumber, action: 'dialogue', dialogue: v.dialogue }] }, chatWebhookUrl: '' } }];"
+        "jsCode": "// The engine's sub-workflow trigger is passthrough: this item has the same\n// shape as the engine webhook's body. movieId alone is enough — the engine\n// derives the campaign from the movie, so no userId needed on this path.\n// Render-only mode sends an empty change plan: the engine resolves the movie,\n// regenerates nothing, and re-renders (concat + soundtrack only).\nconst v = $json;\nconst scenes = v.renderOnly ? [] : [{ sceneNumber: v.sceneNumber, action: 'dialogue', dialogue: v.dialogue }];\nreturn [{ json: { target: { mode: 'patch', movieId: v.movieId }, changes: { scenes }, chatWebhookUrl: '' } }];"
       }
     },
     {
@@ -51,7 +65,10 @@
       "name": "Call engine",
       "type": "n8n-nodes-base.executeWorkflow",
       "typeVersion": 1.2,
-      "position": [600, 300],
+      "position": [
+        600,
+        300
+      ],
       "retryOnFail": true,
       "maxTries": 2,
       "waitBetweenTries": 5000,
@@ -73,10 +90,13 @@
       "name": "Compose message",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [800, 300],
+      "position": [
+        800,
+        300
+      ],
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "// THE CHANNEL SEAM. Everything upstream is delivery-agnostic; everything\n// downstream is one parallel branch per channel — each gated by an IF on its\n// deliverTo key, fanned out from this node and fanned back in at 'Merge\n// deliveries'. Each branch gets the same payload:\n//   url       — the rendered movie (direct mp4 link)\n//   caption   — human text that ENDS WITH the url, so plain-text channels\n//               (Teams/Mattermost/email/SMS…) can send it as-is and\n//               link-unfurling channels get an inline player for free\n//   deliverTo — the per-channel destination ids from the request body\n//   result    — the machine-readable summary echoed to the webhook caller\n// To add a channel: copy the Discord branch (IF on your deliverTo key → your\n// node → a new Merge input), set onError=continue so it can't kill the others,\n// and add one guarded line in 'Finalize delivery'.\nconst r = $json;\nif (!r.url) throw new Error('engine returned no movie URL: ' + JSON.stringify(r).slice(0, 200));\nconst v = $('Validate').first().json;\nconst changed = Number(r.changed || 0);\nconst caption = `\\u{1F3AC} Scene ${v.sceneNumber} dialogue ${changed ? 'updated' : 'unchanged (no-op — same line as before)'}:\\n\\u{201C}${v.dialogue}\\u{201D}\\n${r.url}`;\nreturn [{ json: { url: r.url, caption, deliverTo: v.deliverTo, result: { url: r.url, movieId: v.movieId, sceneNumber: v.sceneNumber, dialogue: v.dialogue, changed } } }];"
+        "jsCode": "// THE CHANNEL SEAM. Everything upstream is delivery-agnostic; everything\n// downstream is one parallel branch per channel — each gated by an IF on its\n// deliverTo key, fanned out from this node and fanned back in at 'Merge\n// deliveries'. Each branch gets the same payload:\n//   url       — the rendered movie (direct mp4 link)\n//   caption   — human text that ENDS WITH the url, so plain-text channels\n//               (Teams/Mattermost/email/SMS…) can send it as-is and\n//               link-unfurling channels get an inline player for free\n//   deliverTo — the per-channel destination ids from the request body\n//   result    — the machine-readable summary echoed to the webhook caller\n// To add a channel: copy the Discord branch (IF on your deliverTo key → your\n// node → a new Merge input), set onError=continue so it can't kill the others,\n// and add one guarded line in 'Finalize delivery'.\nconst r = $json;\nif (!r.url) throw new Error('engine returned no movie URL: ' + JSON.stringify(r).slice(0, 200));\nconst v = $('Validate').first().json;\nconst changed = Number(r.changed || 0);\nconst caption = v.renderOnly\n  ? `🎬 Movie re-rendered (no edit):\n${r.url}`\n  : `🎬 Scene ${v.sceneNumber} dialogue ${changed ? 'updated' : 'unchanged (no-op — same line as before)'}:\n“${v.dialogue}”\n${r.url}`;\nconst result = Object.assign({ url: r.url, movieId: v.movieId, changed },\n  v.renderOnly ? { renderOnly: true } : { sceneNumber: v.sceneNumber, dialogue: v.dialogue });\nreturn [{ json: { url: r.url, caption, deliverTo: v.deliverTo, result } }];"
       },
       "notes": "The channel seam: one payload out, one gated parallel branch per destination. Telegram gets a real video upload (≤ ~20 MB via URL fetch), Slack gets a true file upload, Discord gets the caption whose trailing URL auto-embeds."
     },
@@ -85,7 +105,10 @@
       "name": "IF Telegram channel given",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
-      "position": [1000, 160],
+      "position": [
+        1000,
+        160
+      ],
       "parameters": {
         "conditions": {
           "options": {
@@ -116,7 +139,10 @@
       "name": "Send video",
       "type": "n8n-nodes-base.telegram",
       "typeVersion": 1.2,
-      "position": [1200, 120],
+      "position": [
+        1200,
+        120
+      ],
       "onError": "continueErrorOutput",
       "parameters": {
         "resource": "message",
@@ -139,7 +165,10 @@
       "name": "Send link message",
       "type": "n8n-nodes-base.telegram",
       "typeVersion": 1.2,
-      "position": [1400, 280],
+      "position": [
+        1400,
+        280
+      ],
       "onError": "continueRegularOutput",
       "parameters": {
         "resource": "message",
@@ -159,7 +188,10 @@
       "name": "Mark delivered (video)",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [1420, 40],
+      "position": [
+        1420,
+        40
+      ],
       "parameters": {
         "mode": "runOnceForAllItems",
         "jsCode": "const c = $('Compose message').first().json;\nreturn [{ json: { ...c.result, delivered: 'video' } }];"
@@ -170,7 +202,10 @@
       "name": "Mark delivered (link)",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [1620, 280],
+      "position": [
+        1620,
+        280
+      ],
       "parameters": {
         "mode": "runOnceForAllItems",
         "jsCode": "// Reached via Send video's error output; Send link itself is also non-fatal\n// (onError=continue) so a total Telegram failure can't block the other\n// channels or the webhook response — it just reports 'failed'.\nconst c = $('Compose message').first().json;\nreturn [{ json: { ...c.result, delivered: $json.error ? 'failed' : 'link' } }];"
@@ -181,7 +216,10 @@
       "name": "IF Discord channel given",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
-      "position": [1000, 480],
+      "position": [
+        1000,
+        480
+      ],
       "parameters": {
         "conditions": {
           "options": {
@@ -212,7 +250,10 @@
       "name": "Send to Discord",
       "type": "n8n-nodes-base.discord",
       "typeVersion": 2,
-      "position": [1200, 480],
+      "position": [
+        1200,
+        480
+      ],
       "onError": "continueRegularOutput",
       "parameters": {
         "authentication": "botToken",
@@ -245,7 +286,10 @@
       "name": "IF Slack channel given",
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
-      "position": [1000, 720],
+      "position": [
+        1000,
+        720
+      ],
       "parameters": {
         "conditions": {
           "options": {
@@ -276,7 +320,10 @@
       "name": "Download video",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [1200, 720],
+      "position": [
+        1200,
+        720
+      ],
       "onError": "continueRegularOutput",
       "parameters": {
         "method": "GET",
@@ -296,7 +343,10 @@
       "name": "Send to Slack",
       "type": "n8n-nodes-base.slack",
       "typeVersion": 2.2,
-      "position": [1400, 720],
+      "position": [
+        1400,
+        720
+      ],
       "onError": "continueRegularOutput",
       "parameters": {
         "authentication": "accessToken",
@@ -322,7 +372,10 @@
       "name": "Merge deliveries",
       "type": "n8n-nodes-base.merge",
       "typeVersion": 3,
-      "position": [1840, 400],
+      "position": [
+        1840,
+        400
+      ],
       "parameters": {
         "mode": "append",
         "numberInputs": 3,
@@ -335,7 +388,10 @@
       "name": "Finalize delivery",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [2040, 400],
+      "position": [
+        2040,
+        400
+      ],
       "parameters": {
         "mode": "runOnceForAllItems",
         "jsCode": "// Channel-agnostic fan-in: one status per deliverTo key. Every node reference\n// is guarded, so deleting a channel branch (or adding one — extend the pattern\n// below) doesn't break this node.\nconst c = $('Compose message').first().json;\nconst to = $('Validate').first().json.deliverTo;\nconst deliveries = {};\nif (to.telegram) {\n  deliveries.telegram = 'failed';\n  try { deliveries.telegram = $('Mark delivered (link)').first().json.delivered; }\n  catch (e) { try { deliveries.telegram = $('Mark delivered (video)').first().json.delivered; } catch (e2) {} }\n} else { deliveries.telegram = 'skipped'; }\nif (to.discord) { try { deliveries.discord = $('Send to Discord').first().json.error ? 'failed' : 'sent'; } catch (e) { deliveries.discord = 'failed'; } } else { deliveries.discord = 'skipped'; }\nif (to.slack) { try { deliveries.slack = $('Send to Slack').first().json.error ? 'failed' : 'sent'; } catch (e) { deliveries.slack = 'failed'; } } else { deliveries.slack = 'skipped'; }\nreturn [{ json: { ...c.result, deliveries } }];"
@@ -346,7 +402,10 @@
       "name": "Respond",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.1,
-      "position": [2240, 400],
+      "position": [
+        2240,
+        400
+      ],
       "parameters": {
         "respondWith": "json",
         "responseBody": "={{ $json }}",
@@ -355,50 +414,230 @@
     }
   ],
   "connections": {
-    "Patch request": { "main": [ [ { "node": "Validate", "type": "main", "index": 0 } ] ] },
-    "Validate": { "main": [ [ { "node": "Build engine payload", "type": "main", "index": 0 } ] ] },
-    "Build engine payload": { "main": [ [ { "node": "Call engine", "type": "main", "index": 0 } ] ] },
-    "Call engine": { "main": [ [ { "node": "Compose message", "type": "main", "index": 0 } ] ] },
+    "Patch request": {
+      "main": [
+        [
+          {
+            "node": "Validate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate": {
+      "main": [
+        [
+          {
+            "node": "Build engine payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build engine payload": {
+      "main": [
+        [
+          {
+            "node": "Call engine",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call engine": {
+      "main": [
+        [
+          {
+            "node": "Compose message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
     "Compose message": {
       "main": [
         [
-          { "node": "IF Telegram channel given", "type": "main", "index": 0 },
-          { "node": "IF Discord channel given", "type": "main", "index": 0 },
-          { "node": "IF Slack channel given", "type": "main", "index": 0 }
+          {
+            "node": "IF Telegram channel given",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "IF Discord channel given",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "IF Slack channel given",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     },
     "IF Telegram channel given": {
       "main": [
-        [ { "node": "Send video", "type": "main", "index": 0 } ],
-        [ { "node": "Merge deliveries", "type": "main", "index": 0 } ]
+        [
+          {
+            "node": "Send video",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Merge deliveries",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "Send video": {
       "main": [
-        [ { "node": "Mark delivered (video)", "type": "main", "index": 0 } ],
-        [ { "node": "Send link message", "type": "main", "index": 0 } ]
+        [
+          {
+            "node": "Mark delivered (video)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send link message",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
-    "Send link message": { "main": [ [ { "node": "Mark delivered (link)", "type": "main", "index": 0 } ] ] },
-    "Mark delivered (video)": { "main": [ [ { "node": "Merge deliveries", "type": "main", "index": 0 } ] ] },
-    "Mark delivered (link)": { "main": [ [ { "node": "Merge deliveries", "type": "main", "index": 0 } ] ] },
+    "Send link message": {
+      "main": [
+        [
+          {
+            "node": "Mark delivered (link)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark delivered (video)": {
+      "main": [
+        [
+          {
+            "node": "Merge deliveries",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark delivered (link)": {
+      "main": [
+        [
+          {
+            "node": "Merge deliveries",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
     "IF Discord channel given": {
       "main": [
-        [ { "node": "Send to Discord", "type": "main", "index": 0 } ],
-        [ { "node": "Merge deliveries", "type": "main", "index": 1 } ]
+        [
+          {
+            "node": "Send to Discord",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Merge deliveries",
+            "type": "main",
+            "index": 1
+          }
+        ]
       ]
     },
-    "Send to Discord": { "main": [ [ { "node": "Merge deliveries", "type": "main", "index": 1 } ] ] },
+    "Send to Discord": {
+      "main": [
+        [
+          {
+            "node": "Merge deliveries",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
     "IF Slack channel given": {
       "main": [
-        [ { "node": "Download video", "type": "main", "index": 0 } ],
-        [ { "node": "Merge deliveries", "type": "main", "index": 2 } ]
+        [
+          {
+            "node": "Download video",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Merge deliveries",
+            "type": "main",
+            "index": 2
+          }
+        ]
       ]
     },
-    "Download video": { "main": [ [ { "node": "Send to Slack", "type": "main", "index": 0 } ] ] },
-    "Send to Slack": { "main": [ [ { "node": "Merge deliveries", "type": "main", "index": 2 } ] ] },
-    "Merge deliveries": { "main": [ [ { "node": "Finalize delivery", "type": "main", "index": 0 } ] ] },
-    "Finalize delivery": { "main": [ [ { "node": "Respond", "type": "main", "index": 0 } ] ] }
+    "Download video": {
+      "main": [
+        [
+          {
+            "node": "Send to Slack",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send to Slack": {
+      "main": [
+        [
+          {
+            "node": "Merge deliveries",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "Merge deliveries": {
+      "main": [
+        [
+          {
+            "node": "Finalize delivery",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Finalize delivery": {
+      "main": [
+        [
+          {
+            "node": "Respond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
   }
 }

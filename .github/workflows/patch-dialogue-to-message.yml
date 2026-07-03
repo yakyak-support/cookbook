@@ -25,8 +25,9 @@ on:
   workflow_dispatch:
     inputs:
       dialogue:
-        description: "New dialogue line for the scene (don't end it with a period)"
-        required: true
+        description: "New dialogue line for the scene (don't end it with a period). Leave blank to skip the edit and just re-render + deliver."
+        required: false
+        default: ""
       movieId:
         description: "YakYak movie id (IG grid ?movieId=…)"
         required: true
@@ -74,13 +75,18 @@ jobs:
           fi
           body=$(jq -n --arg m "$MOVIE_ID" --arg d "$DIALOGUE" --arg s "$SCENE_NUMBER" \
             --arg tg "$TELEGRAM_CHANNEL" --arg dc "$DISCORD_CHANNEL" --arg sl "$SLACK_CHANNEL" \
-            '{movieId: $m, dialogue: $d, sceneNumber: ($s | tonumber),
-              deliverTo: (({telegram: $tg, discord: $dc, slack: $sl}) | with_entries(select(.value != "")))}')
-          echo "→ patching scene $SCENE_NUMBER of $MOVIE_ID"
+            '{movieId: $m,
+              deliverTo: (({telegram: $tg, discord: $dc, slack: $sl}) | with_entries(select(.value != "")))}
+             + (if $d != "" then {dialogue: $d, sceneNumber: ($s | tonumber)} else {} end)')
+          if [ -n "$DIALOGUE" ]; then
+            echo "→ patching scene $SCENE_NUMBER of $MOVIE_ID"
+          else
+            echo "→ render-only: re-rendering $MOVIE_ID (no edit)"
+          fi
           resp=$(curl -sS --fail-with-body --max-time 1800 \
             -X POST "$N8N_PATCH_MESSAGE_WEBHOOK_URL" \
             -H "Content-Type: application/json" \
             -H "x-render-token: $N8N_RENDER_TOKEN" \
             -d "$body")
           echo "$resp"
-          echo "$resp" | python3 -c "import json,sys; d=json.load(sys.stdin); print('::notice::scene %s %s; deliveries: %s; %s' % (d.get('sceneNumber'), 'updated' if d.get('changed') else 'unchanged (no-op)', json.dumps(d.get('deliveries')), d.get('url')))"
+          echo "$resp" | python3 -c "import json,sys; d=json.load(sys.stdin); w=('render-only' if d.get('renderOnly') else 'scene %s %s' % (d.get('sceneNumber'), 'updated' if d.get('changed') else 'unchanged (no-op)')); print('::notice::%s; deliveries: %s; %s' % (w, json.dumps(d.get('deliveries')), d.get('url')))"

@@ -242,6 +242,11 @@ async function main() {
     changed = 1;
     console.log("→ waiting for screenplay generation…");
     await waitScreenplayDone(movieId);
+    // The screenplay completing only means the scenes were WRITTEN — their
+    // image/movie/subtitle/burn renders keep going (AI-video scenes take
+    // minutes). Rendering before they settle stitches placeholders.
+    console.log("→ waiting for scene generation…");
+    await waitScenesSettled(movieId);
   } else {
     const { scenes } = await GET(`/workflow/get-scenes/${movieId}`);
     const byNumber = new Map(scenes.map((s) => [s.sceneNumber, s]));
@@ -307,9 +312,9 @@ async function waitScenesSettled(movieId, { tries = 120, everyMs = 5000 } = {}) 
 }
 const fmt = (x) => (x ? `${x.done}/${x.total}${x.failed ? ` (${x.failed}✗)` : ""}` : "-");
 
-// Episode mode's completion signal (as the web app does): the movieScreenplay
-// execution completing. export-render then drives any per-scene renders still
-// in flight to done before concat.
+// Episode mode phase 1: the movieScreenplay execution completing — the scenes
+// don't exist before it. NOT sufficient on its own: per-scene renders continue
+// after it, so phase 2 (waitScenesSettled) must follow before export-render.
 async function waitScreenplayDone(movieId, { tries = 120, everyMs = 5000 } = {}) {
   for (let i = 0; i < tries; i++) {
     const prog = await GET(`/workflow/get-movie-progress/${movieId}`);

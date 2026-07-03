@@ -20,6 +20,7 @@ change + render from any external event.
 - **[`workflow.patch-dialogue-to-message.json`](./workflow.patch-dialogue-to-message.json)** —
   front-end, patch mode: one `POST` changes a line of dialogue and delivers the rendered
   video to **Telegram, Discord and/or Slack**, chosen per request via a `deliverTo` object.
+  Omit `dialogue` for **render-only mode** — no edit, just re-render + deliver.
   Triggerable from a GitHub Action
   ([`.github/workflows/patch-dialogue-to-message.yml`](../../.github/workflows/patch-dialogue-to-message.yml)).
   Full beginner walkthrough (bot setup for all three apps, credentials, import, testing):
@@ -28,16 +29,14 @@ change + render from any external event.
   **Breaking Bricks News** daily show (fetch real headlines → Claude writes the episode →
   engine mints + renders the episode → announce). See
   [`docs/breaking_bricks_news.md`](./docs/breaking_bricks_news.md).
-- **[`workflow.render-to-telegram.json`](./workflow.render-to-telegram.json)** — render one
-  movie and deliver the finished video to **Telegram**; triggered by a GitHub Action (or any
-  `POST`). Self-contained — calls the YakYak API directly, no engine. See
-  [`docs/render_to_telegram.md`](./docs/render_to_telegram.md); the same flow without n8n
-  is the standalone script in [`../telegram/`](../telegram/).
 - **[`regen-from-template.mjs`](./regen-from-template.mjs)** — a zero-dependency Node script
   that runs the engine's flow from a terminal. Use it to prove your token, template, and
   account before wiring nodes.
 - **[`changes.example.json`](./changes.example.json)** — an example "what to regenerate"
   change plan (the schema is in the engine guide, §7).
+
+Prefer no n8n at all? The standalone render-and-deliver-to-Telegram script lives in
+[`../telegram/`](../telegram/) — same YakYak calls, zero dependencies.
 
 ## Start here
 

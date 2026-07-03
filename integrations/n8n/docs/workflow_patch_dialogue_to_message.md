@@ -289,6 +289,8 @@ curl -sS -X POST https://YOUR-N8N/webhook/yakyak-patch-message \
 
 **`deliverTo` is the whole routing system.** Include a key → that app gets the video. Leave a key out → that app is skipped. Only Slack today? Send only `"slack": "C0…"`.
 
+**`dialogue` is optional.** Leave it (and `sceneNumber`) out entirely and you get **render-only mode**: nothing is edited, the movie is just re-rendered and the video delivered to your chats — handy for "send me the current cut" without touching a scene.
+
 Now **wait a few minutes** — changing a line makes YakYak regenerate that scene's subtitles and re-render the whole movie. You can watch it cook in n8n under **Executions** (the engine shows up as its own run):
 
 ![A run in progress](../assets/executions-list-running.jpeg)
