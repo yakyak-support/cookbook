@@ -79,33 +79,18 @@ curl -sS -X POST "https://<your-n8n-host>/webhook/yakyak-render-telegram" \
 
 ## Variant: change a dialogue line first, then render
 
-The educational sibling — same delivery, but the movie is **edited** before rendering:
+Want the movie **edited** before rendering (a new dialogue line, then deliver)? That's the
+engine-chaining pattern — use
+**[`workflow.patch-dialogue-to-message.json`](../workflow.patch-dialogue-to-message.json)**,
+which patches the scene through the [yakyak-engine](./yakyak_engine.md) and delivers to
+Telegram, Discord and/or Slack per request (full walkthrough:
+[`workflow_patch_dialogue_to_message.md`](./workflow_patch_dialogue_to_message.md)).
 
-```mermaid
-flowchart LR
-    G["GitHub Actions<br/>{dialogue, sceneNumber, movieId}"] --> F["n8n front-end<br/>(5 nodes: gate + shape)"]
-    F --> E["n8n ENGINE (patch mode)<br/>update-scene-dialogue,<br/>settle, re-render"]
-    E --> Y["YakYak"] --> T["Telegram"]
-```
-
-- **[`.github/workflows/patch-dialogue-to-telegram.yml`](../../../.github/workflows/patch-dialogue-to-telegram.yml)** —
-  inputs: `dialogue` (the new line — don't end it with a period), `movieId`, `sceneNumber`.
-- **[`../workflow.patch-dialogue-to-telegram.json`](../workflow.patch-dialogue-to-telegram.json)** —
-  validates, then POSTs a patch payload to the **engine**'s webhook
-  (`/webhook/yakyak-regen` on the same instance) and delivers the engine's result.
-  Requires the engine workflow to be imported and published too.
-- Extra GitHub secret: `N8N_PATCH_WEBHOOK_URL` =
-  `https://<your-n8n-host>/webhook/yakyak-patch-telegram` (reuses `N8N_RENDER_TOKEN`).
-
-Why it exists next to the direct-render workflow: side by side they show the two ways to
-build on YakYak in n8n — **call the API directly** when the job is a fixed sequence
-(render + deliver), **chain through the engine** when the job needs its machinery
-(campaign resolution, diff-aware scene edits, generation waits). The engine is diff-aware,
-so re-running with the same dialogue is a free no-op: `{"changed": 0}`, only the re-concat
-happens, and the Telegram caption says so.
-
-For **multi-channel** delivery (Telegram + Discord + Slack from one request), see
-[`workflow_patch_dialogue_to_message.md`](./workflow_patch_dialogue_to_message.md).
+Side by side, the two workflows show the two ways to build on YakYak in n8n — **call the
+API directly** when the job is a fixed sequence (this doc: render + deliver), **chain
+through the engine** when the job needs its machinery (campaign resolution, diff-aware
+scene edits, generation waits). The engine is diff-aware, so re-running with the same
+dialogue is a free no-op: `{"changed": 0}`, only the re-concat happens.
 
 ## Notes
 

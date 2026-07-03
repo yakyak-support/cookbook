@@ -3,7 +3,7 @@
 **Goal:** run the cookbook's flagship show — [`show/BreakingBricksNews`](../../../show/BreakingBricksNews/)
 ("BBN": the day's real Middle East headlines, restaged as a satirical brick-built newscast) —
 on an n8n instance instead of the GitHub-Actions showrunner, using the
-[`workflow.import-regen-post.json`](../workflow.import-regen-post.json) engine in
+[`workflow.yakyak-engine.json`](../workflow.yakyak-engine.json) engine in
 **`episode` mode**: one campaign, one new episode per day.
 
 This doc maps every piece of the showrunner pipeline onto n8n and documents the **built,
@@ -41,12 +41,13 @@ nodes (8–9, 11).
 ## 2. Architecture: two workflows, not one
 
 Keep the generic engine untouched and put BBN in its own workflow that **calls the
-engine's webhook**:
+engine as a sub-workflow** (an n8n Execute Workflow call — same instance, no webhook URL,
+no door-key secret):
 
 ```
 ┌─ BBN daily (this doc) ───────────────────────────────────────────┐
 │ Schedule ► Balance guard ► Fetch×3 ► Claude ► Story→plot ►       │
-│ Build payload ► HTTP POST http://localhost:5678/webhook/yakyak-regen ─┼─► engine runs
+│ Build engine payload ► Execute Workflow: yakyak-engine ──────────┼─► engine runs
 │ ◄─────────────────────────── { url, movieId, … } ◄───────────────┼── episode mode
 │ ► Finalize (soundtrack/social — §4) ► Post to chat/social        │
 └──────────────────────────────────────────────────────────────────┘
@@ -54,20 +55,20 @@ engine's webhook**:
 
 Why split: the engine stays reusable for every show (and for patch-mode automations); BBN
 concerns (news sources, cast map, soundtrack, captioning) live where they belong; and the
-engine's webhook responds only when the episode is **rendered**, so the front-end gets the
+sub-workflow call returns only when the episode is **rendered**, so the front-end gets the
 finished `movieId`/`url` back synchronously and can finalize.
 
 > **Ordering note:** the engine renders before the front-end regains control, so the
 > soundtrack pin lives **inside the engine** — the optional
 > `changes.movie.soundtrackAudioPath` / `soundtrackVolume` fields (§4.1), applied in
-> **Apply changes** before generation and render. The engine stays generic: shows without
+> its change stage before generation and render. The engine stays generic: shows without
 > a pinned track simply omit the fields.
 
 ---
 
 ## 3. The BBN front-end workflow, node by node (as built)
 
-The importable file is [`workflow.bbn-daily.json`](../workflow.bbn-daily.json) — 11 nodes,
+The importable file is [`workflow.bbn-daily.json`](../workflow.bbn-daily.json) — 12 nodes,
 one straight line:
 
 ```
@@ -83,17 +84,16 @@ Every morning (cron 0 6 * * *)
  └► Build story payload    Code — storyToDescription() port (cast aliases, one-line prose,
  │                          dialog append, no trailing period), ≤50-char social title from
  │                          the story's '## Social title:' line, headline caption
- └► Call engine            HTTP — POST the yakyak-regen webhook, mode: episode,
- │                          pinned BBN_CAMPAIGN_ID, soundtrack fields, 45 min timeout,
- │                          retry ×2 (safe: a re-run lands on the same unrendered slot)
+ └► Build engine payload   Code — shape the engine call: mode: episode, pinned
+ │                          BBN_CAMPAIGN_ID, the story as changes.movie.plot, optional
+ │                          soundtrack pin fields
+ └► Call engine            Execute Workflow — the yakyak-engine sub-workflow; waits for
+ │                          it to finish (safe to re-run: the engine's slot picker lands
+ │                          on the same unrendered episode)
  └► Set social fields      HTTP — update-movie-social-description, continue-on-error
  └► Announce               HTTP — post title + movie URL to BBN_CHAT_WEBHOOK_URL,
                             continue-on-error
 ```
-
-The same line on the n8n canvas:
-
-![The bbn-daily workflow on the n8n canvas](../assets/bbn-daily-workflow-canvas.jpeg)
 
 Design notes, in the order they'll matter:
 
@@ -188,37 +188,42 @@ want the repo trail, and accept that this deviates from the CI rule.
 
 ## 5. Assembly & configuration
 
-Two workflows on one n8n instance, chained over the engine's webhook (the front-end calls
-`http://localhost:5678/webhook/yakyak-regen` on its own instance):
+Two workflows on one n8n instance, chained with an Execute Workflow sub-call:
 
-1. **Import the engine** — [`workflow.import-regen-post.json`](../workflow.import-regen-post.json)
-   (already done if you followed [`docs/n8n_readme.md`](../../../docs/n8n_readme.md)) —
-   and **Publish** it: the front-end needs its production webhook live.
+1. **Import the engine** — [`workflow.yakyak-engine.json`](../workflow.yakyak-engine.json)
+   with its two credentials (already done if you followed
+   [`yakyak_engine.md`](./yakyak_engine.md) §5). It does **not** need to be published for
+   the sub-workflow call — only for its public webhook.
 2. **Import the front-end** — [`workflow.bbn-daily.json`](../workflow.bbn-daily.json) —
-   and **Publish** it to arm the daily schedule.
-3. **Set the env vars** on the n8n instance (docker `-e` flags, alongside the ones the
-   engine already needs — `YAKYAK_TOKEN`, `YAKYAK_API_BASE`,
-   `N8N_BLOCK_ENV_ACCESS_IN_NODE=false`, `N8N_RUNNERS_ENABLED=true`):
+   open its **Call engine** node and pick the engine from the workflow dropdown, then
+   **Publish** it to arm the daily schedule.
+3. **Set the env vars** on the n8n instance (docker `-e` flags; the *front-end's* Code
+   nodes read them, so keep `N8N_BLOCK_ENV_ACCESS_IN_NODE=false` and
+   `N8N_RUNNERS_ENABLED=true`; the engine itself needs none — its auth lives in the
+   credentials):
 
 | Env var | Required | Value |
 | --- | --- | --- |
 | `ANTHROPIC_API_KEY` | ✅ | For the story call (`Write story (Claude)`). |
+| `YAKYAK_TOKEN` | ✅ | For the front-end's own YakYak calls (`Balance guard`, `Set social fields`). |
+| `YAKYAK_API_BASE` | — | Default `https://api.yakyak.ai`; set beta here for test runs. |
 | `BBN_CAMPAIGN_ID` | ✅ | The BBN campaign id — `show.env` `CAMPAIGN_ID` (`a7e7b9c5-0959-41a0-9176-509a3b197775` for the production show). |
 | `BBN_SOUNDTRACK_AUDIO_PATH` | — | The intro track's content address — `show.env` `SOUNDTRACK_AUDIO_PATH`. Omit to skip the soundtrack pin. |
 | `BBN_SOUNDTRACK_VOLUME` | — | `45` (`show.env` `VOLUME`). |
 | `BBN_CHAT_WEBHOOK_URL` | — | Slack/Discord/Teams incoming webhook for the announcement. |
 | `BBN_MIN_TOKEN_BALANCE` | — | Default `2000` (`show.env` `MIN_TOKEN_BALANCE`). |
-| `YAKYAK_ENGINE_URL` | — | Default `http://localhost:5678/webhook/yakyak-regen`. Point elsewhere if the engine runs on another instance. |
 
 4. **First run by hand:** open the front-end → **Test workflow** — the Schedule trigger
-   fires once immediately. Watch both executions (front-end + engine) in the Executions
-   tab. On **beta** first (`YAKYAK_API_BASE=https://api.beta.yakyak.ai`, beta PAT, beta
-   campaign id) the whole run is effectively free.
+   fires once immediately. The engine's run shows up nested under the front-end's
+   execution. On **beta** first (`YAKYAK_API_BASE=https://api.beta.yakyak.ai`, beta PAT
+   in both the env var and the `YakYak API` credential, beta campaign id) the whole run
+   is effectively free.
 
 **Runtime shape:** each morning produces two executions — "BBN daily" (spends most of its
-life inside the 45-minute engine call) and the engine run (slot picking, screenplay poll,
-render poll). The boundary between them is one JSON payload you can copy out of **Call
-engine**'s input and replay with `curl` when debugging.
+life waiting on the engine sub-workflow) and the nested engine run (slot picking,
+screenplay poll, render poll). The boundary between them is one JSON payload you can copy
+out of **Build engine payload**'s output and replay with `curl` against the engine's
+webhook (`/webhook/yakyak-engine` + `x-render-token`) when debugging.
 
 ---
 

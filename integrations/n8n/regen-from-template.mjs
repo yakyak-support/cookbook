@@ -3,8 +3,8 @@
 // regen-from-template.mjs — v2
 //
 // Reference implementation of the YakYak "resolve a target → patch it or mint a
-// new episode → render → post" flow. This is the exact sequence the n8n workflow
-// (workflow.import-regen-post.json) runs; use it to validate the pipeline from a
+// new episode → render → post" flow. This is the same sequence the n8n engine
+// (workflow.yakyak-engine.json) runs; use it to validate the pipeline from a
 // terminal before (or instead of) wiring the visual nodes. Zero dependencies —
 // Node 18+ (global fetch) only.
 //
@@ -33,7 +33,7 @@
 //   CHAT_WEBHOOK_URL=https://hooks.slack.com/services/...  \  # optional
 //   node regen-from-template.mjs
 //
-// See docs/n8n_readme.md for the full walkthrough and the changes.json schema.
+// See docs/yakyak_engine.md for the full walkthrough and the changes.json schema.
 // -----------------------------------------------------------------------------
 
 import { readFile } from "node:fs/promises";

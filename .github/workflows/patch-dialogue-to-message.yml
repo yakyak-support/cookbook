@@ -1,12 +1,12 @@
-# GitHub → n8n → engine → YakYak → Telegram — credentials edition.
+# GitHub → n8n → engine → YakYak → Telegram/Discord/Slack.
 #
-# Sibling of patch-dialogue-to-telegram.yml, retargeted at the multi-user-safe
-# n8n pair (integrations/n8n/workflow.patch-dialogue-to-message.json, which
-# calls workflow.yakyak-engine.json as a sub-workflow). Contract changes versus
-# the old flow: the webhook path is /webhook/yakyak-patch-message, and routing
-# travels in the body as one deliverTo object — every channel is a bot
-# credential on the n8n instance, and deliverTo says which channel id each bot
-# posts to. Include a key to deliver there, omit it to skip that channel.
+# Thin trigger for the multi-user-safe n8n pair
+# (integrations/n8n/workflow.patch-dialogue-to-message.json, which calls
+# workflow.yakyak-engine.json as a sub-workflow). The webhook path is
+# /webhook/yakyak-patch-message, and routing travels in the body as one
+# deliverTo object — every channel is a bot credential on the n8n instance,
+# and deliverTo says which channel id each bot posts to. Include a key to
+# deliver there, omit it to skip that channel.
 #
 # Re-running with the SAME dialogue is a free no-op: the engine is diff-aware,
 # so only the final re-concat happens.
