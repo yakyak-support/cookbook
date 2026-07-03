@@ -1,0 +1,404 @@
+{
+  "name": "YakYak — patch scene dialogue via engine, deliver message",
+  "meta": { "templateCredsSetupCompleted": false },
+  "settings": { "executionOrder": "v1", "executionTimeout": 3600 },
+  "nodes": [
+    {
+      "id": "trigger",
+      "name": "Patch request",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 300],
+      "webhookId": "yakyak-patch-message",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "yakyak-patch-message",
+        "authentication": "headerAuth",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "name": "YakYak render webhook token"
+        }
+      },
+      "notes": "POST { movieId, dialogue, sceneNumber?, deliverTo: { telegram?, discord?, slack? } }. Auth: the header set in the 'YakYak render webhook token' Header Auth credential. One consistent routing story: every channel is a bot credential on the instance, and deliverTo says which channel id each bot posts to — include a key to deliver there, omit it to skip (response reports sent/skipped per channel). deliverTo values: telegram = chat id (from @userinfobot or getUpdates), discord = channel id (right-click channel → Copy Channel ID, Developer Mode on), slack = channel id (C…, channel details dialog)."
+    },
+    {
+      "id": "validate",
+      "name": "Validate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [200, 300],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Gate + shape. This is deliberately ALL this workflow does itself — the\n// change/render heavy lifting is delegated to the engine sub-workflow\n// (workflow.yakyak-engine.json) two nodes down. The webhook token check that\n// used to live here is now the webhook node's Header Auth credential.\nconst body = $('Patch request').first().json.body || {};\nif (!body.movieId) throw new Error('body.movieId is required (the ?movieId= param on the IG grid)');\nlet dialogue = String(body.dialogue || '').trim();\nif (!dialogue) throw new Error('body.dialogue is required');\n// YakYak convention: dialogue must not end in a period (\"!\" / \"?\" are fine)\ndialogue = dialogue.replace(/\\.+$/, '');\nconst sceneNumber = Number(body.sceneNumber || 1);\nif (!Number.isInteger(sceneNumber) || sceneNumber < 1) throw new Error('body.sceneNumber must be a positive integer');\n// Routing: one shape for every channel. Each bot credential can post anywhere,\n// so the destination travels with the request; a present key = deliver there.\nconst dt = body.deliverTo || {};\nconst deliverTo = {\n  telegram: String(dt.telegram || '').trim(),\n  discord: String(dt.discord || '').trim(),\n  slack: String(dt.slack || '').trim(),\n};\nif (!deliverTo.telegram && !deliverTo.discord && !deliverTo.slack) {\n  throw new Error('deliverTo must name at least one channel, e.g. {\"deliverTo\":{\"telegram\":\"175991…\",\"discord\":\"138512…\",\"slack\":\"C0BF…\"}}');\n}\nreturn [{ json: { movieId: body.movieId, dialogue, sceneNumber, deliverTo } }];"
+      }
+    },
+    {
+      "id": "buildPayload",
+      "name": "Build engine payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [400, 300],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// The engine's sub-workflow trigger is passthrough: this item has the same\n// shape as the engine webhook's body. movieId alone is enough — the engine\n// derives the campaign from the movie, so no userId needed on this path.\nconst v = $json;\nreturn [{ json: { target: { mode: 'patch', movieId: v.movieId }, changes: { scenes: [{ sceneNumber: v.sceneNumber, action: 'dialogue', dialogue: v.dialogue }] }, chatWebhookUrl: '' } }];"
+      }
+    },
+    {
+      "id": "callEngine",
+      "name": "Call engine",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [600, 300],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000,
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "",
+          "cachedResultName": "YakYak engine — resolve target, patch or new episode, render, post"
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "notes": "Select the imported workflow.yakyak-engine.json here after import — sub-workflow call replaces the old YAKYAK_ENGINE_URL webhook hop, so no URL or token to configure. Returns { url, movieId, campaignId, mode, changed }. Retry is safe: the engine is diff-aware (same line is a free no-op)."
+    },
+    {
+      "id": "compose",
+      "name": "Compose message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [800, 300],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// THE CHANNEL SEAM. Everything upstream is delivery-agnostic; everything\n// downstream is one parallel branch per channel — each gated by an IF on its\n// deliverTo key, fanned out from this node and fanned back in at 'Merge\n// deliveries'. Each branch gets the same payload:\n//   url       — the rendered movie (direct mp4 link)\n//   caption   — human text that ENDS WITH the url, so plain-text channels\n//               (Teams/Mattermost/email/SMS…) can send it as-is and\n//               link-unfurling channels get an inline player for free\n//   deliverTo — the per-channel destination ids from the request body\n//   result    — the machine-readable summary echoed to the webhook caller\n// To add a channel: copy the Discord branch (IF on your deliverTo key → your\n// node → a new Merge input), set onError=continue so it can't kill the others,\n// and add one guarded line in 'Finalize delivery'.\nconst r = $json;\nif (!r.url) throw new Error('engine returned no movie URL: ' + JSON.stringify(r).slice(0, 200));\nconst v = $('Validate').first().json;\nconst changed = Number(r.changed || 0);\nconst caption = `\\u{1F3AC} Scene ${v.sceneNumber} dialogue ${changed ? 'updated' : 'unchanged (no-op — same line as before)'}:\\n\\u{201C}${v.dialogue}\\u{201D}\\n${r.url}`;\nreturn [{ json: { url: r.url, caption, deliverTo: v.deliverTo, result: { url: r.url, movieId: v.movieId, sceneNumber: v.sceneNumber, dialogue: v.dialogue, changed } } }];"
+      },
+      "notes": "The channel seam: one payload out, one gated parallel branch per destination. Telegram gets a real video upload (≤ ~20 MB via URL fetch), Slack gets a true file upload, Discord gets the caption whose trailing URL auto-embeds."
+    },
+    {
+      "id": "ifTelegram",
+      "name": "IF Telegram channel given",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1000, 160],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "tg1",
+              "leftValue": "={{ $('Validate').first().json.deliverTo.telegram }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "notes": "Telegram delivery is opt-in per request (deliverTo.telegram). Absent → skip straight to the merge; response reports deliveries.telegram: skipped."
+    },
+    {
+      "id": "sendVideo",
+      "name": "Send video",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [1200, 120],
+      "onError": "continueErrorOutput",
+      "parameters": {
+        "resource": "message",
+        "operation": "sendVideo",
+        "chatId": "={{ $('Validate').first().json.deliverTo.telegram }}",
+        "file": "={{ $('Compose message').first().json.url }}",
+        "additionalFields": {
+          "caption": "={{ $('Compose message').first().json.caption }}"
+        }
+      },
+      "credentials": {
+        "telegramApi": {
+          "name": "YakYak Telegram bot"
+        }
+      },
+      "notes": "Native Telegram node — the bot token lives in the 'YakYak Telegram bot' credential. sendVideo by URL arrives playable (≤ ~20 MB). Error output (e.g. video too large) falls back to a plain link message."
+    },
+    {
+      "id": "sendLink",
+      "name": "Send link message",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [1400, 280],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "={{ $('Validate').first().json.deliverTo.telegram }}",
+        "text": "={{ $('Compose message').first().json.caption }}",
+        "additionalFields": {}
+      },
+      "credentials": {
+        "telegramApi": {
+          "name": "YakYak Telegram bot"
+        }
+      }
+    },
+    {
+      "id": "markVideo",
+      "name": "Mark delivered (video)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1420, 40],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const c = $('Compose message').first().json;\nreturn [{ json: { ...c.result, delivered: 'video' } }];"
+      }
+    },
+    {
+      "id": "markLink",
+      "name": "Mark delivered (link)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1620, 280],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Reached via Send video's error output; Send link itself is also non-fatal\n// (onError=continue) so a total Telegram failure can't block the other\n// channels or the webhook response — it just reports 'failed'.\nconst c = $('Compose message').first().json;\nreturn [{ json: { ...c.result, delivered: $json.error ? 'failed' : 'link' } }];"
+      }
+    },
+    {
+      "id": "ifDiscord",
+      "name": "IF Discord channel given",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1000, 480],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "dc1",
+              "leftValue": "={{ $('Validate').first().json.deliverTo.discord }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "notes": "Discord delivery is opt-in per request (deliverTo.discord). Absent → skip straight to the merge; response reports deliveries.discord: skipped."
+    },
+    {
+      "id": "sendDiscord",
+      "name": "Send to Discord",
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2,
+      "position": [1200, 480],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "authentication": "botToken",
+        "resource": "message",
+        "operation": "send",
+        "guildId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "0",
+          "cachedResultName": "(unused — bot-token channel sends route by channel id alone)"
+        },
+        "sendTo": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $('Validate').first().json.deliverTo.discord }}"
+        },
+        "content": "={{ $('Compose message').first().json.caption }}",
+        "options": {}
+      },
+      "credentials": {
+        "discordBotApi": {
+          "name": "YakYak Discord bot"
+        }
+      },
+      "notes": "Bot-token delivery so the destination travels with the request (deliverTo.discord = channel id), same pattern as Telegram and Slack. Credential: 'Discord Bot API' named 'YakYak Discord bot' (token from discord.com/developers → your app → Bot → Reset Token); invite the bot to the server with Send Messages permission. The 'Server' field is only used by dropdowns/OAuth2 — bot mode routes purely by channel id, so it stays empty. The caption's trailing mp4 URL auto-embeds. onError=continue: reported as deliveries.discord sent|failed."
+    },
+    {
+      "id": "ifSlack",
+      "name": "IF Slack channel given",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1000, 720],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "sc1",
+              "leftValue": "={{ $('Validate').first().json.deliverTo.slack }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "notes": "Slack delivery is opt-in per request (deliverTo.slack). Absent → skip straight to the merge — no invisible unshared uploads; response reports deliveries.slack: skipped."
+    },
+    {
+      "id": "downloadVideo",
+      "name": "Download video",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1200, 720],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.url }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file"
+            }
+          }
+        }
+      },
+      "notes": "Slack has no send-by-URL: the mp4 must be uploaded as bytes, so this fetches it into binary first (held in n8n memory for the hop). Telegram and Discord don't need this — their branches pass the URL through."
+    },
+    {
+      "id": "sendSlack",
+      "name": "Send to Slack",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [1400, 720],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "authentication": "accessToken",
+        "resource": "file",
+        "operation": "upload",
+        "binaryData": true,
+        "binaryPropertyName": "data",
+        "options": {
+          "channelId": "={{ $('Validate').first().json.deliverTo.slack }}",
+          "fileName": "={{ 'yakyak-scene-' + $('Validate').first().json.sceneNumber + '.mp4' }}",
+          "initialComment": "={{ $('Compose message').first().json.caption }}"
+        }
+      },
+      "credentials": {
+        "slackApi": {
+          "name": "YakYak Slack bot"
+        }
+      },
+      "notes": "True video upload (plays inline like Telegram). Credential: 'Slack API' type named 'YakYak Slack bot', Access Token = the xoxb- bot token (scopes: chat:write + files:write); /invite the bot to the channel once. The target channel arrives per request as deliverTo.slack. NOTE: at node version 2.2 the upload uses Slack's new API whose completion call only accepts the SINGULAR channelId option — the plural 'Channel Names or IDs' (channelIds) is silently ignored and the file uploads unshared/invisibly. onError=continue: reported as deliveries.slack sent|failed."
+    },
+    {
+      "id": "mergeDeliveries",
+      "name": "Merge deliveries",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [1840, 400],
+      "parameters": {
+        "mode": "append",
+        "numberInputs": 3,
+        "options": {}
+      },
+      "notes": "Waits for every channel branch (delivered or skipped) before responding. Adding a channel: bump 'Number of Inputs' and wire both outputs of your IF gate into the new input. Input 1: Telegram. Input 2: Discord. Input 3: Slack."
+    },
+    {
+      "id": "finalize",
+      "name": "Finalize delivery",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2040, 400],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Channel-agnostic fan-in: one status per deliverTo key. Every node reference\n// is guarded, so deleting a channel branch (or adding one — extend the pattern\n// below) doesn't break this node.\nconst c = $('Compose message').first().json;\nconst to = $('Validate').first().json.deliverTo;\nconst deliveries = {};\nif (to.telegram) {\n  deliveries.telegram = 'failed';\n  try { deliveries.telegram = $('Mark delivered (link)').first().json.delivered; }\n  catch (e) { try { deliveries.telegram = $('Mark delivered (video)').first().json.delivered; } catch (e2) {} }\n} else { deliveries.telegram = 'skipped'; }\nif (to.discord) { try { deliveries.discord = $('Send to Discord').first().json.error ? 'failed' : 'sent'; } catch (e) { deliveries.discord = 'failed'; } } else { deliveries.discord = 'skipped'; }\nif (to.slack) { try { deliveries.slack = $('Send to Slack').first().json.error ? 'failed' : 'sent'; } catch (e) { deliveries.slack = 'failed'; } } else { deliveries.slack = 'skipped'; }\nreturn [{ json: { ...c.result, deliveries } }];"
+      }
+    },
+    {
+      "id": "respond",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [2240, 400],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {}
+      }
+    }
+  ],
+  "connections": {
+    "Patch request": { "main": [ [ { "node": "Validate", "type": "main", "index": 0 } ] ] },
+    "Validate": { "main": [ [ { "node": "Build engine payload", "type": "main", "index": 0 } ] ] },
+    "Build engine payload": { "main": [ [ { "node": "Call engine", "type": "main", "index": 0 } ] ] },
+    "Call engine": { "main": [ [ { "node": "Compose message", "type": "main", "index": 0 } ] ] },
+    "Compose message": {
+      "main": [
+        [
+          { "node": "IF Telegram channel given", "type": "main", "index": 0 },
+          { "node": "IF Discord channel given", "type": "main", "index": 0 },
+          { "node": "IF Slack channel given", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "IF Telegram channel given": {
+      "main": [
+        [ { "node": "Send video", "type": "main", "index": 0 } ],
+        [ { "node": "Merge deliveries", "type": "main", "index": 0 } ]
+      ]
+    },
+    "Send video": {
+      "main": [
+        [ { "node": "Mark delivered (video)", "type": "main", "index": 0 } ],
+        [ { "node": "Send link message", "type": "main", "index": 0 } ]
+      ]
+    },
+    "Send link message": { "main": [ [ { "node": "Mark delivered (link)", "type": "main", "index": 0 } ] ] },
+    "Mark delivered (video)": { "main": [ [ { "node": "Merge deliveries", "type": "main", "index": 0 } ] ] },
+    "Mark delivered (link)": { "main": [ [ { "node": "Merge deliveries", "type": "main", "index": 0 } ] ] },
+    "IF Discord channel given": {
+      "main": [
+        [ { "node": "Send to Discord", "type": "main", "index": 0 } ],
+        [ { "node": "Merge deliveries", "type": "main", "index": 1 } ]
+      ]
+    },
+    "Send to Discord": { "main": [ [ { "node": "Merge deliveries", "type": "main", "index": 1 } ] ] },
+    "IF Slack channel given": {
+      "main": [
+        [ { "node": "Download video", "type": "main", "index": 0 } ],
+        [ { "node": "Merge deliveries", "type": "main", "index": 2 } ]
+      ]
+    },
+    "Download video": { "main": [ [ { "node": "Send to Slack", "type": "main", "index": 0 } ] ] },
+    "Send to Slack": { "main": [ [ { "node": "Merge deliveries", "type": "main", "index": 2 } ] ] },
+    "Merge deliveries": { "main": [ [ { "node": "Finalize delivery", "type": "main", "index": 0 } ] ] },
+    "Finalize delivery": { "main": [ [ { "node": "Respond", "type": "main", "index": 0 } ] ] }
+  }
+}

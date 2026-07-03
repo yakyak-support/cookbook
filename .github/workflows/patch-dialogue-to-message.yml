@@ -1,0 +1,86 @@
+# GitHub → n8n → engine → YakYak → Telegram — credentials edition.
+#
+# Sibling of patch-dialogue-to-telegram.yml, retargeted at the multi-user-safe
+# n8n pair (integrations/n8n/workflow.patch-dialogue-to-message.json, which
+# calls workflow.yakyak-engine.json as a sub-workflow). Contract changes versus
+# the old flow: the webhook path is /webhook/yakyak-patch-message, and routing
+# travels in the body as one deliverTo object — every channel is a bot
+# credential on the n8n instance, and deliverTo says which channel id each bot
+# posts to. Include a key to deliver there, omit it to skip that channel.
+#
+# Re-running with the SAME dialogue is a free no-op: the engine is diff-aware,
+# so only the final re-concat happens.
+#
+# Secrets required (repo Settings → Secrets and variables → Actions):
+#   N8N_PATCH_MESSAGE_WEBHOOK_URL — e.g. https://<your-n8n>/webhook/yakyak-patch-message
+#   N8N_RENDER_TOKEN              — must equal the value in the n8n
+#                                   "YakYak render webhook token" Header Auth credential
+# Optional default destinations (each input can override; blank = skip channel):
+#   TELEGRAM_CHANNEL_ID           — Telegram chat id
+#   DISCORD_CHANNEL_ID            — Discord channel id
+#   SLACK_CHANNEL_ID              — Slack channel id (C…)
+name: Patch dialogue → render → message
+
+on:
+  workflow_dispatch:
+    inputs:
+      dialogue:
+        description: "New dialogue line for the scene (don't end it with a period)"
+        required: true
+      movieId:
+        description: "YakYak movie id (IG grid ?movieId=…)"
+        required: true
+        default: "acffd965-e17f-4d14-9273-72858d7e38fd"
+      sceneNumber:
+        description: "1-based scene number to change"
+        required: true
+        default: "1"
+      telegramChannel:
+        description: "Telegram chat id (blank = TELEGRAM_CHANNEL_ID secret)"
+        required: false
+        default: ""
+      discordChannel:
+        description: "Discord channel id (blank = DISCORD_CHANNEL_ID secret)"
+        required: false
+        default: ""
+      slackChannel:
+        description: "Slack channel id C… (blank = SLACK_CHANNEL_ID secret)"
+        required: false
+        default: ""
+
+jobs:
+  patch-render-send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Trigger n8n patch pipeline
+        env:
+          N8N_PATCH_MESSAGE_WEBHOOK_URL: ${{ secrets.N8N_PATCH_MESSAGE_WEBHOOK_URL }}
+          N8N_RENDER_TOKEN: ${{ secrets.N8N_RENDER_TOKEN }}
+          # Inputs go through env (not inline interpolation) so quotes/backticks
+          # in the dialogue can't break — or inject into — the shell command.
+          DIALOGUE: ${{ inputs.dialogue }}
+          MOVIE_ID: ${{ inputs.movieId }}
+          SCENE_NUMBER: ${{ inputs.sceneNumber }}
+          TELEGRAM_CHANNEL: ${{ inputs.telegramChannel != '' && inputs.telegramChannel || secrets.TELEGRAM_CHANNEL_ID }}
+          DISCORD_CHANNEL: ${{ inputs.discordChannel != '' && inputs.discordChannel || secrets.DISCORD_CHANNEL_ID }}
+          SLACK_CHANNEL: ${{ inputs.slackChannel != '' && inputs.slackChannel || secrets.SLACK_CHANNEL_ID }}
+        run: |
+          if [ -z "$N8N_PATCH_MESSAGE_WEBHOOK_URL" ]; then
+            echo "::error::N8N_PATCH_MESSAGE_WEBHOOK_URL secret is not set" && exit 1
+          fi
+          if [ -z "$TELEGRAM_CHANNEL" ] && [ -z "$DISCORD_CHANNEL" ] && [ -z "$SLACK_CHANNEL" ]; then
+            echo "::error::no destination — set at least one of TELEGRAM_CHANNEL_ID / DISCORD_CHANNEL_ID / SLACK_CHANNEL_ID (secret or input)" && exit 1
+          fi
+          body=$(jq -n --arg m "$MOVIE_ID" --arg d "$DIALOGUE" --arg s "$SCENE_NUMBER" \
+            --arg tg "$TELEGRAM_CHANNEL" --arg dc "$DISCORD_CHANNEL" --arg sl "$SLACK_CHANNEL" \
+            '{movieId: $m, dialogue: $d, sceneNumber: ($s | tonumber),
+              deliverTo: (({telegram: $tg, discord: $dc, slack: $sl}) | with_entries(select(.value != "")))}')
+          echo "→ patching scene $SCENE_NUMBER of $MOVIE_ID"
+          resp=$(curl -sS --fail-with-body --max-time 1800 \
+            -X POST "$N8N_PATCH_MESSAGE_WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -H "x-render-token: $N8N_RENDER_TOKEN" \
+            -d "$body")
+          echo "$resp"
+          echo "$resp" | python3 -c "import json,sys; d=json.load(sys.stdin); print('::notice::scene %s %s; deliveries: %s; %s' % (d.get('sceneNumber'), 'updated' if d.get('changed') else 'unchanged (no-op)', json.dumps(d.get('deliveries')), d.get('url')))"

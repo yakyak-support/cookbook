@@ -9,7 +9,7 @@
 #   N8N_WEBHOOK_URL     — the workflow's PUBLIC production webhook URL, e.g.
 #                         https://<your-n8n-host>/webhook/yakyak-render-telegram
 #                         (GitHub runners cannot reach localhost — see
-#                         integrations/telegram/README.md for tunnel options)
+#                         integrations/n8n/docs/render_to_telegram.md for tunnel options)
 #   N8N_RENDER_TOKEN    — shared secret; must match RENDER_WEBHOOK_TOKEN on the
 #                         n8n instance (the webhook triggers paid renders)
 #

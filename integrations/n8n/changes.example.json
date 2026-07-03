@@ -1,0 +1,34 @@
+{
+  "_comment": "Selective regeneration plan. Scenes NOT listed here are reused as-is from the template (no regen, no tokens). One action per entry; put two edits to the SAME scene in separate runs to avoid a race on the shared burn step. sceneNumber matches the template's scenes[].sceneNumber (1-based).",
+
+  "movie": {
+    "title": "Johan and Claire ride the Silk Road (director's cut)"
+  },
+
+  "scenes": [
+    {
+      "sceneNumber": 3,
+      "action": "story",
+      "story": "Scene 3: A sandstorm rolls over the dunes as Johan and Claire gun the dirt bike toward a distant caravanserai.",
+      "_note": "Visual rewrite → regenerates image → movie → burn. Voiceover/subtitle audio is reused."
+    },
+    {
+      "sceneNumber": 5,
+      "action": "dialogue",
+      "dialogue": "Hold on tight, the desert doesn't forgive hesitation",
+      "_note": "Narration change → regenerates subtitle → burn only. No trailing period (YakYak dialogue rule)."
+    },
+    {
+      "sceneNumber": 2,
+      "action": "animation",
+      "prompt": "slow push-in on the riders, gentle upward tilt",
+      "_note": "Ken Burns change → regenerates movie → burn. Same still image is reused."
+    },
+    {
+      "sceneNumber": 7,
+      "action": "retry",
+      "from": "image",
+      "_note": "Re-run the whole scene from the image stage with the SAME prompt (e.g. you disliked the generated still)."
+    }
+  ]
+}

@@ -29,3 +29,6 @@ sdk/python/
 .venv/
 .DS_Store
 course/package-lock.json
+
+# local parking lot for files pending deletion (never commit)
+integrations/potentially_unused/

@@ -1,0 +1,148 @@
+{
+  "name": "YakYak — render movie, deliver to Telegram",
+  "meta": { "templateCredsSetupCompleted": false },
+  "settings": { "executionOrder": "v1", "executionTimeout": 3600 },
+  "nodes": [
+    {
+      "id": "trigger",
+      "name": "Render request",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 300],
+      "webhookId": "yakyak-render-telegram",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "yakyak-render-telegram",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "notes": "POST { movieId, force?, chatId?, token? }. Called by the GitHub Action (.github/workflows/render-to-telegram.yml) — or anything else."
+    },
+    {
+      "id": "validate",
+      "name": "Validate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [200, 300],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Gate + defaults. This webhook triggers PAID renders — when the instance is\n// exposed to the internet (it must be, for GitHub to reach it), set\n// RENDER_WEBHOOK_TOKEN and callers must present it (x-render-token header or\n// body.token).\nconst j = $('Render request').first().json;\nconst body = j.body || {};\nconst expected = $env.RENDER_WEBHOOK_TOKEN || '';\nif (expected) {\n  const got = (j.headers && j.headers['x-render-token']) || body.token || '';\n  if (got !== expected) throw new Error('invalid or missing render token');\n}\nconst movieId = body.movieId;\nif (!movieId) throw new Error('body.movieId is required (the ?movieId= param on the IG grid)');\nreturn [{ json: { movieId, force: body.force !== false, chatId: body.chatId || '', base: $env.YAKYAK_API_BASE || 'https://api.yakyak.ai' } }];"
+      }
+    },
+    {
+      "id": "exportRender",
+      "name": "Export render",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [400, 300],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.base }}/workflow/export-render",
+        "sendHeaders": true,
+        "headerParameters": { "parameters": [ { "name": "Authorization", "value": "=Bearer {{ $env.YAKYAK_TOKEN }}" } ] },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { movieId: $json.movieId, force: $json.force } }}",
+        "options": {}
+      },
+      "notes": "Concat + soundtrack. Per-scene assets are reused; only the final stitch is billed."
+    },
+    {
+      "id": "movieProgress",
+      "name": "Movie progress",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [600, 300],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('Validate').first().json.base }}/workflow/get-movie-progress/{{ $('Validate').first().json.movieId }}",
+        "sendHeaders": true,
+        "headerParameters": { "parameters": [ { "name": "Authorization", "value": "=Bearer {{ $env.YAKYAK_TOKEN }}" } ] },
+        "options": {}
+      }
+    },
+    {
+      "id": "evalRender",
+      "name": "Render done?",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [800, 300],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const ex = {};\nfor (const e of ($json.executions || [])) ex[e.type] = e.status;\nif (ex.movieConcat === 'failed' || ex.movieSoundtrack === 'failed') throw new Error('render failed');\nconst done = ex.movieConcat === 'completed' && (ex.movieSoundtrack === undefined || ex.movieSoundtrack === 'completed');\nreturn [{ json: { done } }];"
+      }
+    },
+    {
+      "id": "ifRender",
+      "name": "IF render done",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1000, 300],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "typeValidation": "loose", "version": 2 },
+          "combinator": "and",
+          "conditions": [ { "id": "r1", "leftValue": "={{ $json.done }}", "rightValue": true, "operator": { "type": "boolean", "operation": "true", "singleValue": true } } ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "waitRender",
+      "name": "Wait 15s (render)",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [1000, 480],
+      "webhookId": "wait-render-tg",
+      "parameters": { "amount": 15, "unit": "seconds" }
+    },
+    {
+      "id": "getMovie",
+      "name": "Get movie",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1200, 220],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('Validate').first().json.base }}/workflow/get-movie/{{ $('Validate').first().json.movieId }}",
+        "sendHeaders": true,
+        "headerParameters": { "parameters": [ { "name": "Authorization", "value": "=Bearer {{ $env.YAKYAK_TOKEN }}" } ] },
+        "options": {}
+      }
+    },
+    {
+      "id": "deliver",
+      "name": "Deliver to Telegram",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1400, 220],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// sendVideo fetches the mp4 by URL server-side, so the video arrives PLAYABLE\n// in the chat (≤ ~20 MB). On any failure fall back to a link message — never\n// lose a finished render.\nconst movie = ($json.movie || $json);\nconst url = movie.finalMovieUrl || movie.soundtrackedMovieUrl || movie.concatMovieUrl;\nif (!url) throw new Error('render completed but get-movie returned no movie URL');\nconst title = movie.title || 'YakYak movie';\nconst chatId = $('Validate').first().json.chatId || $env.TELEGRAM_CHAT_ID;\nif (!chatId) throw new Error('no chat id — set TELEGRAM_CHAT_ID on the instance or pass chatId in the body');\nconst bot = $env.TELEGRAM_BOT_TOKEN;\nif (!bot) throw new Error('TELEGRAM_BOT_TOKEN env var is not set');\nconst caption = `\\u{1F3AC} ${title}\\n${url}`;\nconst tg = (method, body) => this.helpers.httpRequest({\n  method: 'POST', url: `https://api.telegram.org/bot${bot}/${method}`,\n  body, json: true,\n});\nlet delivered = 'video';\ntry {\n  await tg('sendVideo', { chat_id: chatId, video: url, caption });\n} catch (e) {\n  await tg('sendMessage', { chat_id: chatId, text: caption });\n  delivered = 'link';\n}\nreturn [{ json: { url, title, movieId: $('Validate').first().json.movieId, delivered } }];"
+      }
+    },
+    {
+      "id": "respond",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1600, 220],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { url: $json.url, title: $json.title, movieId: $json.movieId, delivered: $json.delivered } }}",
+        "options": {}
+      }
+    }
+  ],
+  "connections": {
+    "Render request": { "main": [ [ { "node": "Validate", "type": "main", "index": 0 } ] ] },
+    "Validate": { "main": [ [ { "node": "Export render", "type": "main", "index": 0 } ] ] },
+    "Export render": { "main": [ [ { "node": "Movie progress", "type": "main", "index": 0 } ] ] },
+    "Movie progress": { "main": [ [ { "node": "Render done?", "type": "main", "index": 0 } ] ] },
+    "Render done?": { "main": [ [ { "node": "IF render done", "type": "main", "index": 0 } ] ] },
+    "IF render done": { "main": [ [ { "node": "Get movie", "type": "main", "index": 0 } ], [ { "node": "Wait 15s (render)", "type": "main", "index": 0 } ] ] },
+    "Wait 15s (render)": { "main": [ [ { "node": "Movie progress", "type": "main", "index": 0 } ] ] },
+    "Get movie": { "main": [ [ { "node": "Deliver to Telegram", "type": "main", "index": 0 } ] ] },
+    "Deliver to Telegram": { "main": [ [ { "node": "Respond", "type": "main", "index": 0 } ] ] }
+  }
+}

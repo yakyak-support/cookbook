@@ -1,0 +1,526 @@
+{
+  "name": "YakYak — resolve target, patch or new episode, render, post",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "executionTimeout": 3600
+  },
+  "nodes": [
+    {
+      "id": "trigger",
+      "name": "Input event",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        300
+      ],
+      "webhookId": "yakyak-regen",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "yakyak-regen",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "notes": "POST here to start. Body: { target: {mode: patch|episode, campaignId?, campaignName?, movieId?}, importData?, changes, chatWebhookUrl? }"
+    },
+    {
+      "id": "resolveTarget",
+      "name": "Resolve target",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Resolve WHICH campaign and WHICH movie this run operates on — without ever\n// creating a duplicate campaign (the v1 import-per-run mistake).\n//   campaign: target.campaignId → derived from target.movieId → adopt-by-name\n//             via list-campaign → import ONCE\n//   movie:    patch   → target.movieId || the trailer/template movie\n//             episode → lowest unrendered slot || create-new-season || bootstrap\nconst base = $env.YAKYAK_API_BASE || 'https://api.yakyak.ai';\nconst token = $env.YAKYAK_TOKEN;\nconst body = $('Input event').first().json.body || {};\nconst target = body.target || {};\nconst mode = target.mode || 'patch';\nif (mode !== 'patch' && mode !== 'episode') throw new Error(`unknown target.mode \"${mode}\" (use \"patch\" or \"episode\")`);\n\n// The PAT is yy_live_ + a JWT whose payload carries the userId in its `id` claim.\nlet userId = $env.YAKYAK_USER_ID || '';\nif (!userId) {\n  try {\n    const payload = (token || '').replace(/^yy_live_/, '').split('.')[1];\n    userId = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')).id || '';\n  } catch {}\n}\nif (!userId) throw new Error('Could not decode a userId from YAKYAK_TOKEN (malformed token?)');\n\nconst req = (method, path, bodyJson) => this.helpers.httpRequest({\n  method, url: base + path,\n  headers: { Authorization: 'Bearer ' + token, ...(bodyJson ? { 'Content-Type': 'application/json' } : {}) },\n  body: bodyJson, json: true,\n});\nconst sleep = (ms) => new Promise((r) => setTimeout(r, ms));\n\n// ---- campaign: reuse before create ----------------------------------------\nconst list = await req('GET', `/workflow/list-campaign/${userId}`);\nconst owned = list.campaigns || [];\nlet campaignId = target.campaignId || '';\nlet listEntry = null;\nlet provisioned = 'reused';\nif (!campaignId && target.movieId) {\n  // Movie-id-only call (e.g. \"patch this grid movie\"): derive the campaign\n  // from the movie itself — the caller shouldn't need to know it.\n  const gotMovie = await req('GET', `/workflow/get-movie/${target.movieId}`);\n  campaignId = ((gotMovie.movie || gotMovie).campaignId) || '';\n  if (!campaignId) throw new Error(`get-movie ${target.movieId} returned no campaignId`);\n}\nif (campaignId) {\n  listEntry = owned.find((c) => c.id === campaignId) || null;\n  if (!listEntry) throw new Error(`campaign ${campaignId} is not owned by this token's user`);\n} else {\n  const name = target.campaignName || (body.importData && body.importData.campaigns && body.importData.campaigns[0] && body.importData.campaigns[0].name) || '';\n  if (!name) throw new Error('need target.campaignId, target.campaignName, or importData to resolve a campaign');\n  // Oldest name match = the canonical original (later same-name copies are\n  // v1-era import duplicates). Deterministic across runs.\n  const matches = owned.filter((c) => c.name === name)\n    .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));\n  if (matches.length) {\n    listEntry = matches[0];\n    campaignId = listEntry.id;\n  } else if (body.importData) {\n    const imported = await req('POST', '/workflow/import-campaign', { userId, importData: body.importData });\n    campaignId = imported.campaigns && imported.campaigns[0] && imported.campaigns[0].id;\n    if (!campaignId) throw new Error('import-campaign returned no campaign');\n    provisioned = 'imported';\n  } else {\n    throw new Error(`no owned campaign named \"${name}\" and no importData to provision one`);\n  }\n}\n\n// ---- movie -----------------------------------------------------------------\nconst fetchMovies = async () => {\n  const got = await req('GET', `/workflow/get-campaign/${campaignId}`);\n  return ((got.campaign || got).movies || [])\n    .slice()\n    .sort((a, b) => (Number(a.season) - Number(b.season)) || (Number(a.episode) - Number(b.episode)));\n};\nlet movies = await fetchMovies();\nlet movieId = '';\n\nif (mode === 'patch') {\n  // Patch default is the TRAILER/TEMPLATE — the campaign's stable face. Numbered\n  // episodes must be pinned via target.movieId (auto-picking S1E1 out of a grid\n  // of episodes was a footgun). Note: get-campaign lists only numbered episodes;\n  // the trailer comes from list-campaign's entry.template.id.\n  const templateId = (listEntry && listEntry.template && listEntry.template.id) || '';\n  if (target.movieId) {\n    if (!movies.some((m) => m.id === target.movieId) && target.movieId !== templateId) {\n      throw new Error(`movie ${target.movieId} not found in campaign ${campaignId} (${movies.length} episode(s); template: ${templateId || 'none'})`);\n    }\n    movieId = target.movieId;\n  } else if (templateId) {\n    movieId = templateId;\n  } else if (movies.length === 1) {\n    movieId = movies[0].id; // no template and exactly one movie — unambiguous\n  } else if (movies.length === 0) {\n    throw new Error(`campaign ${campaignId} has no template movie and no episodes to patch`);\n  } else {\n    const list = movies.map((m) => `S${m.season}E${m.episode}=${m.id}`).join(', ');\n    throw new Error(`campaign ${campaignId} has no template movie and ${movies.length} episodes — pass target.movieId. Candidates: ${list}`);\n  }\n} else {\n  // episode mode: generation auto-chains only in basic mode. Best-effort — we\n  // own the campaign, but don't fail the run over it.\n  try { await req('POST', '/workflow/switch-campaign-mode', { campaignId, mode: 'basic' }); } catch {}\n  const nextSlot = (ms) => ms.find((m) => !(m.renderedMovieUrl || ''));\n  let slot = nextSlot(movies);\n  if (!slot) {\n    if (movies.length > 0) {\n      // every slot rendered → mint the next season\n      await req('POST', '/workflow/create-new-season', { campaignId });\n    } else {\n      // fresh campaign, no numbered slots: create-new-season can't bootstrap\n      // from nothing (it 500s) — seed season 1 from the template movie.\n      const templateId = listEntry && listEntry.template && listEntry.template.id;\n      if (!templateId) throw new Error('campaign has no episode slots and no template movie to bootstrap from');\n      await req('POST', '/workflow/gen-movie-season', { movieId: templateId });\n    }\n    // Code nodes are time-capped (~60s under task runners), so wait briefly\n    // here and tell the caller to retry if slots are still materialising.\n    for (let i = 0; i < 8 && !slot; i++) { await sleep(5000); movies = await fetchMovies(); slot = nextSlot(movies); }\n    if (!slot) throw new Error('season creation is still in progress — re-run in a minute and it will pick up the new slot');\n  }\n  movieId = slot.id;\n}\n\nreturn [{ json: { userId, base, mode, campaignId, movieId, provisioned, chatWebhookUrl: body.chatWebhookUrl || '' } }];"
+      },
+      "notes": "Never import per run. Adopt the owned campaign by id or name; import only once as a fallback. patch → trailer/template (or pinned movieId); episode → next unrendered slot (new season when full)."
+    },
+    {
+      "id": "getScenes",
+      "name": "Get scenes",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        440,
+        300
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.base }}/workflow/get-scenes/{{ $json.movieId }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.YAKYAK_TOKEN }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "notes": "Current scene values — used by patch mode to map sceneNumber → id AND to skip no-op edits. (Episode mode: a fresh slot has no scenes; harmless.)"
+    },
+    {
+      "id": "applyChanges",
+      "name": "Apply changes",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// PATCH mode: apply each change via the update-scene-* endpoint that both\n// persists the edit AND self-triggers the right regen cascade — skipping no-ops\n// (compared against current values) so a re-delivered trigger event doesn't\n// re-bill unchanged scenes (a redundant `story` costs an AI image gen).\n// EPISODE mode: write the new slot's plot and kick gen-movie-screenplay, which\n// writes the whole screenplay AND renders every scene server-side (💸).\nconst t = $('Resolve target').first().json;\nconst base = t.base, movieId = t.movieId, mode = t.mode;\nconst token = $env.YAKYAK_TOKEN;\nconst changes = ($('Input event').first().json.body.changes) || {};\nconst req = (path, body) => this.helpers.httpRequest({\n  method: 'POST', url: base + path,\n  headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },\n  body, json: true,\n});\n\nlet changed = 0;\n\nif (changes.movie && changes.movie.title) {\n  await req('/workflow/update-movie-title', { movieId, title: changes.movie.title });\n}\n// Optional soundtrack pin (content-address reuse — no upload, no generation).\n// The path is a CDN content address; env prefixes (beta/, prd/) resolve in the\n// shared bucket regardless of which env the campaign lives in (docs/forking.md).\nif (changes.movie && changes.movie.soundtrackAudioPath) {\n  await req('/workflow/set-soundtrack-audio', { movieId, audioPath: changes.movie.soundtrackAudioPath });\n}\nif (changes.movie && changes.movie.soundtrackVolume != null) {\n  await req('/workflow/set-soundtrack', { movieId, volumePercentage: Number(changes.movie.soundtrackVolume) });\n}\n\nif (mode === 'episode') {\n  if (!changes.movie || !changes.movie.plot) throw new Error('episode mode needs changes.movie.plot (the story text for the new episode)');\n  await req('/workflow/set-movie-metadata', { movieId, plot: changes.movie.plot });\n  await req('/workflow/gen-movie-screenplay', { movieId });\n  return [{ json: { movieId, mode, changed: 1 } }];\n}\n\nconst sceneChanges = changes.scenes || [];\nconst scenes = $('Get scenes').first().json.scenes || [];\nconst byNumber = {};\nfor (const s of scenes) byNumber[s.sceneNumber] = s;\n\nfor (const ch of sceneChanges) {\n  const scene = byNumber[ch.sceneNumber];\n  if (!scene) continue;\n  const sceneId = scene.id;\n  switch (ch.action) {\n    case 'story':\n      if (scene.story === ch.story) continue; // no-op: skip\n      await req('/workflow/update-scene-story', { sceneId, story: ch.story }); break;\n    case 'dialogue':\n      if (scene.dialogue === ch.dialogue) continue;\n      await req('/workflow/update-scene-dialogue', { sceneId, dialogue: ch.dialogue }); break;\n    case 'animation': // current prompt isn't exposed by get-scenes; always apply\n      await req('/workflow/update-scene-animation-prompt', { sceneId, prompt: ch.prompt }); break;\n    case 'styling': {\n      let did = false;\n      if (ch.leadCast != null && ch.leadCast !== scene.leadCast) {\n        await req('/workflow/update-scene-lead-cast', { sceneId, leadCast: ch.leadCast }); did = true;\n      }\n      if (ch.backgroundColor != null) {\n        await req('/workflow/update-scene-background-color', { sceneId, backgroundColor: ch.backgroundColor });\n        await req('/workflow/rerun-scene', { sceneId, from: 'subtitle' }); did = true;\n      }\n      if (!did) continue;\n      break;\n    }\n    case 'title':\n      if (scene.title === ch.title) continue;\n      await req('/workflow/update-scene-title', { sceneId, title: ch.title }); break;\n    case 'retry': await req('/workflow/rerun-scene', { sceneId, from: ch.from || 'image' }); break;\n    case 'regen': await req('/workflow/regen-scene-asset', { sceneId, asset: ch.asset || 'image' }); break;\n    default: throw new Error(`unknown action \"${ch.action}\" for scene ${ch.sceneNumber}`);\n  }\n  changed++;\n}\nreturn [{ json: { movieId, mode, changed } }];"
+      },
+      "notes": "patch: diff-aware update-scene-* (dialogue→subtitle→burn · story→image→movie→burn · …). episode: set-movie-metadata plot + gen-movie-screenplay."
+    },
+    {
+      "id": "genProgress",
+      "name": "Generation progress",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        880,
+        300
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('Resolve target').first().json.base }}/workflow/{{ $('Resolve target').first().json.mode === 'episode' ? 'get-movie-progress' : 'get-movie-scene-progress' }}/{{ $('Resolve target').first().json.movieId }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.YAKYAK_TOKEN }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "notes": "patch → get-movie-scene-progress (stage counts). episode → get-movie-progress (the movieScreenplay execution is the completion signal, as the web app does)."
+    },
+    {
+      "id": "genSettled",
+      "name": "Generation settled?",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// PATCH: nothing changed → nothing to wait for (mirrors the reference script;\n// a movie can legitimately report a stage as forever-pending — the dialogue-less\n// outro scene has no subtitle/burn asset, so those stages sit at N-1/N with 0\n// failed). Otherwise settled when done+failed >= total everywhere.\n// EPISODE: the web app's completion signal — movieScreenplay completing;\n// export-render then finishes any per-scene renders still in flight.\nconst mode = $('Resolve target').first().json.mode;\nconst changed = $('Apply changes').first().json.changed || 0;\nif (changed === 0) return [{ json: { settled: true, failed: 0 } }];\nif (mode === 'episode') {\n  const ex = {};\n  for (const e of ($json.executions || [])) ex[e.type] = e.status;\n  if (ex.movieScreenplay === 'failed') throw new Error('screenplay generation failed');\n  return [{ json: { settled: ex.movieScreenplay === 'completed', failed: 0 } }];\n}\nconst steps = Object.values($json.steps || {});\nconst settled = steps.length === 0 || steps.every((s) => s.total === 0 || (s.done + s.failed) >= s.total);\nconst failed = steps.reduce((n, s) => n + (s.failed || 0), 0);\nreturn [{ json: { settled, failed } }];"
+      }
+    },
+    {
+      "id": "ifSettled",
+      "name": "IF generation done",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1320,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "s1",
+              "leftValue": "={{ $json.settled }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "waitGen",
+      "name": "Wait 15s (generation)",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        1320,
+        480
+      ],
+      "webhookId": "wait-generation",
+      "parameters": {
+        "amount": 15,
+        "unit": "seconds"
+      }
+    },
+    {
+      "id": "exportRender",
+      "name": "Export render",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1540,
+        220
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Resolve target').first().json.base }}/workflow/export-render",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.YAKYAK_TOKEN }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { movieId: $('Resolve target').first().json.movieId, force: true } }}",
+        "options": {}
+      },
+      "notes": "Concat all scenes + soundtrack into the final movie. force:true guarantees a stitched output (and, in episode mode, drives any per-scene renders still finishing)."
+    },
+    {
+      "id": "movieProgress",
+      "name": "Movie progress",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1760,
+        220
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('Resolve target').first().json.base }}/workflow/get-movie-progress/{{ $('Resolve target').first().json.movieId }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.YAKYAK_TOKEN }}"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "evalRender",
+      "name": "Render done?",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1980,
+        220
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const ex = {};\nfor (const e of ($json.executions || [])) ex[e.type] = e.status;\nif (ex.movieConcat === 'failed' || ex.movieSoundtrack === 'failed') throw new Error('render failed');\nconst done = ex.movieConcat === 'completed' && (ex.movieSoundtrack === undefined || ex.movieSoundtrack === 'completed');\nreturn [{ json: { done } }];"
+      }
+    },
+    {
+      "id": "ifRender",
+      "name": "IF render done",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2200,
+        220
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "r1",
+              "leftValue": "={{ $json.done }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "waitRender",
+      "name": "Wait 15s (render)",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        2200,
+        400
+      ],
+      "webhookId": "wait-render",
+      "parameters": {
+        "amount": 15,
+        "unit": "seconds"
+      }
+    },
+    {
+      "id": "getMovie",
+      "name": "Get movie",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2420,
+        140
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('Resolve target').first().json.base }}/workflow/get-movie/{{ $('Resolve target').first().json.movieId }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.YAKYAK_TOKEN }}"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "postChat",
+      "name": "Post to chat",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2640,
+        140
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Resolve target').first().json.chatWebhookUrl }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { text: 'New movie ready (' + $('Resolve target').first().json.mode + '): ' + (($json.movie || $json).finalMovieUrl || ($json.movie || $json).soundtrackedMovieUrl || ($json.movie || $json).concatMovieUrl) } }}",
+        "options": {}
+      },
+      "notes": "Slack/Discord/Teams incoming webhooks all accept { text }. onError=continue: a missing/broken chatWebhookUrl must not kill the run after the render already succeeded."
+    },
+    {
+      "id": "respond",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        2860,
+        140
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { url: (($('Get movie').item.json.movie || $('Get movie').item.json).finalMovieUrl || ($('Get movie').item.json.movie || $('Get movie').item.json).soundtrackedMovieUrl), movieId: $('Resolve target').first().json.movieId, campaignId: $('Resolve target').first().json.campaignId, mode: $('Resolve target').first().json.mode, changed: $('Apply changes').first().json.changed } }}",
+        "options": {}
+      }
+    }
+  ],
+  "connections": {
+    "Input event": {
+      "main": [
+        [
+          {
+            "node": "Resolve target",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Resolve target": {
+      "main": [
+        [
+          {
+            "node": "Get scenes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get scenes": {
+      "main": [
+        [
+          {
+            "node": "Apply changes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apply changes": {
+      "main": [
+        [
+          {
+            "node": "Generation progress",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generation progress": {
+      "main": [
+        [
+          {
+            "node": "Generation settled?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generation settled?": {
+      "main": [
+        [
+          {
+            "node": "IF generation done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF generation done": {
+      "main": [
+        [
+          {
+            "node": "Export render",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Wait 15s (generation)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait 15s (generation)": {
+      "main": [
+        [
+          {
+            "node": "Generation progress",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Export render": {
+      "main": [
+        [
+          {
+            "node": "Movie progress",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Movie progress": {
+      "main": [
+        [
+          {
+            "node": "Render done?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Render done?": {
+      "main": [
+        [
+          {
+            "node": "IF render done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF render done": {
+      "main": [
+        [
+          {
+            "node": "Get movie",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Wait 15s (render)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait 15s (render)": {
+      "main": [
+        [
+          {
+            "node": "Movie progress",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get movie": {
+      "main": [
+        [
+          {
+            "node": "Post to chat",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Post to chat": {
+      "main": [
+        [
+          {
+            "node": "Respond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}

@@ -1,0 +1,181 @@
+{
+  "name": "Breaking Bricks News — daily episode (front-end for the YakYak engine)",
+  "meta": { "templateCredsSetupCompleted": false },
+  "settings": { "executionOrder": "v1", "executionTimeout": 3600 },
+  "nodes": [
+    {
+      "id": "schedule",
+      "name": "Every morning",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 300],
+      "parameters": {
+        "rule": { "interval": [ { "field": "cronExpression", "expression": "0 6 * * *" } ] }
+      },
+      "notes": "06:00 UTC daily — CADENCE=daily in show/BreakingBricksNews/show.env. Use 'Test workflow' to fire a run by hand."
+    },
+    {
+      "id": "balanceGuard",
+      "name": "Balance guard",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [200, 300],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Abort BEFORE burning a partial episode — an episode generates ~10 scenes (💸).\n// Mirrors MIN_TOKEN_BALANCE=2000 in show/BreakingBricksNews/show.env.\nconst base = $env.YAKYAK_API_BASE || 'https://api.yakyak.ai';\nconst token = $env.YAKYAK_TOKEN;\nlet userId = $env.YAKYAK_USER_ID || '';\nif (!userId) {\n  try {\n    const payload = (token || '').replace(/^yy_live_/, '').split('.')[1];\n    userId = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')).id || '';\n  } catch {}\n}\nif (!userId) throw new Error('Could not decode a userId from YAKYAK_TOKEN (malformed token?)');\nconst user = await this.helpers.httpRequest({\n  method: 'GET', url: `${base}/users/${userId}`,\n  headers: { Authorization: 'Bearer ' + token }, json: true,\n});\nconst balance = Number(user.tokenBalance || 0);\nconst min = Number($env.BBN_MIN_TOKEN_BALANCE || 2000);\nif (balance < min) throw new Error(`token balance ${balance} is below the ${min} minimum — top up before generating an episode`);\nreturn [{ json: { userId, balance } }];"
+      }
+    },
+    {
+      "id": "fetchBbc",
+      "name": "Fetch BBC",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [400, 300],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "GET",
+        "url": "https://feeds.bbci.co.uk/news/world/middle_east/rss.xml",
+        "options": { "timeout": 30000, "response": { "response": { "responseFormat": "text" } } }
+      },
+      "notes": "Server-rendered RSS — titles + pubDate. onError=continue: a blocked source must not kill the run (the prompt says to proceed with what it has)."
+    },
+    {
+      "id": "fetchCnn",
+      "name": "Fetch CNN",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [600, 300],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "GET",
+        "url": "https://lite.cnn.com/",
+        "options": { "timeout": 30000, "response": { "response": { "responseFormat": "text" } } }
+      },
+      "notes": "CNN's no-JS site. The prompt keeps only /middleeast/ links; dates are baked into the URLs."
+    },
+    {
+      "id": "fetchAj",
+      "name": "Fetch AJ",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [800, 300],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "GET",
+        "url": "https://www.aljazeera.com/middle-east/",
+        "options": { "timeout": 30000, "response": { "response": { "responseFormat": "text" } } }
+      }
+    },
+    {
+      "id": "buildPrompt",
+      "name": "Build prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1000, 300],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// The BBN head-writer prompt, adapted from show/BreakingBricksNews/prompt.md.\n// Two changes vs the showrunner original: STEP 1's agentic WebFetch is replaced\n// by the source material the three fetch nodes just pulled (an API call can't\n// fetch the web itself), and STEP 4's file-write becomes \"reply with only the\n// markdown\". A '## Social title:' line is requested so ONE model call covers\n// both the story and the ≤50-char social title the showrunner made separately.\nconst trim = (s) => String(s || '').slice(0, 15000);\nconst src = (label, s) => s ? `--- ${label} ---\\n${s}` : `--- ${label} ---\\n(source unavailable this run — proceed without it)`;\nconst bbc = trim(($('Fetch BBC').first().json || {}).data);\nconst cnn = trim(($('Fetch CNN').first().json || {}).data);\nconst aj = trim(($('Fetch AJ').first().json || {}).data);\nif (!bbc && !cnn && !aj) throw new Error('all three news sources failed to fetch — aborting (no material for an episode)');\nconst ts = new Date().toISOString();\n\nconst prompt = `You are the head writer for \"Breaking Bricks News\", a dark-comedy short-form\nvideo series that is grounded in real Middle East events but voiced with\ntongue-in-cheek bite. Your job in this run is to produce ONE story.\n\nSTEP 1 — Read the news. The fetched source material is included below\n(BBC Middle East RSS, CNN Lite front page, Al Jazeera Middle East page).\n  - BBC: read the RSS <pubDate> on each <item> for the timestamp.\n  - CNN: use only links under the \"/middleeast/\" path. The date is baked into\n    each URL (e.g. /2026/07/02/middleeast/...) — use that date as the timestamp.\n    Ignore non-Middle-East stories.\n  - Al Jazeera: use the Middle East feed items.\nOnly keep items whose timestamp falls within the past 24 hours (now: ${ts}).\nIf a source is marked unavailable, note it and proceed with what you have.\n\nSTEP 2 — Pick the threads. From the 24h headlines, choose 3–6 real developments\nthat can be woven into a single narrative arc. Prefer items that touch more\nthan one of our cast.\n\nSTEP 3 — Write the story.\n\nCAST (only these may speak; the \"leading character\" of each scene must be one of them):\n  - Bob Brikko — our fearless Breaking Bricks News field reporter.\n    MUST be the leading character in Scene 1 (cold open) and Scene 10 (sign-off).\n    Tongue-in-cheek, dry, deadpan under fire.\n  - Donald Trump\n  - Benjamin Netanyahu\n  - Mojtaba Khamenei (the Iranian Supreme Leader's son, not Ali)\n  - An Israeli fighter pilot (unnamed, call her/him \"The Pilot\")\n\nTONE: Dark comedy. Real headline beats drive the plot; the humor comes from the\ncharacters' voice, framing, and reaction shots. No slapstick, no cartoon\nvillainy, no slurs. Punch up, not down.\n\nPER-SCENE REQUIREMENTS:\n  - Roughly 200 words of prose describing the scene's visuals, action, and\n    atmosphere (location, what we see, what just happened, what's happening\n    now). Write it as a director would brief a camera op.\n  - Exactly ONE spoken dialog line per scene, 8–12 words, attributed to the\n    scene's leading character. Do NOT end the dialog line with a period\n    (\"!\" or \"?\" are fine).\n  - Leading character must be from the cast. No other characters speak.\n\nSTEP 4 — Reply with ONLY the markdown document below — no preamble, no\ntriple-backtick fences, nothing after it:\n\n  # Breaking Bricks News — Latest Update\n  **Generated (UTC):** ${ts}\n  **Sources:** BBC / CNN / Al Jazeera (Middle East), past 24h\n\n  ## Social title: <punchy title for social posting, 50 characters MAX>\n\n  ## Headlines we drew from:\n  - <one bullet per real event you used, each with the source it came from>\n\n  ## Scene 1 — <short title>\n  **Leading character:** Bob Brikko\n  **Dialog:** \"<8–12 word line>\"\n\n  <~200 words of scene prose>\n\n  ... (continue through Scene 10, which is again Bob Brikko) ...\n\n===== SOURCE MATERIAL =====\n\n${src('BBC Middle East RSS', bbc)}\n\n${src('CNN Lite', cnn)}\n\n${src('Al Jazeera Middle East', aj)}`;\n\nreturn [{ json: { prompt } }];"
+      }
+    },
+    {
+      "id": "writeStory",
+      "name": "Write story (Claude)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1200, 300],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "sendHeaders": true,
+        "headerParameters": { "parameters": [
+          { "name": "x-api-key", "value": "={{ $env.ANTHROPIC_API_KEY }}" },
+          { "name": "anthropic-version", "value": "2023-06-01" }
+        ] },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { model: 'claude-opus-4-8', max_tokens: 16000, thinking: { type: 'adaptive' }, messages: [ { role: 'user', content: $json.prompt } ] } }}",
+        "options": { "timeout": 600000 }
+      },
+      "notes": "Messages API over raw HTTP (no SDK inside n8n). Adaptive thinking; the story lands in the response's text block."
+    },
+    {
+      "id": "storyPayload",
+      "name": "Build story payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1400, 300],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Extract the story markdown from the Claude response, then port of\n// storyToDescription() from show/showrunner/story-format.js: drop everything\n// before the first '## Scene', collapse each scene's prose to one line, append\n// `<Char> says: \"<dialog>\"`, mapping names through the cast map (CAST_ALIASES\n// in show.env — both Mojtaba and Khamenei collapse to the Mojtaba character).\nconst resp = $json;\nif (resp.stop_reason === 'refusal') throw new Error('Claude declined the request (stop_reason: refusal)');\nconst story = (resp.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\\n');\nif (!/## Scene/.test(story)) throw new Error('Claude response contains no \"## Scene\" blocks — not a story');\n\n// ≤50-char social title from the requested '## Social title:' line\nlet socialTitle = '';\nconst mTitle = story.match(/^##\\s*Social title:\\s*(.+)$/mi);\nif (mTitle) socialTitle = [...mTitle[1].trim().replace(/^\"|\"$/g, '')].slice(0, 50).join('');\n\n// caption from the headlines bullets\nconst capLines = [];\nconst hm = story.match(/## Headlines we drew from:\\n([\\s\\S]*?)\\n##/);\nif (hm) for (const l of hm[1].split('\\n')) { const t = l.replace(/^-\\s*/, '').trim(); if (t) capLines.push(t); }\nconst socialCaption = capLines.slice(0, 6).join(' · ').slice(0, 400);\n\nconst ALIASES = { Bob: 'Bob', Trump: 'Trump', Netanyahu: 'Netanyahu', Mojtaba: 'Mojtaba', Khamenei: 'Mojtaba', Pilot: 'Pilot' };\nconst mapShort = (name) => { for (const k of Object.keys(ALIASES)) if (name.includes(k)) return ALIASES[k]; return String(name).trim(); };\n\nconst lines = story.split(/\\r?\\n/);\nlet inScene = false, n = 0, prose = '', character = '', dialog = '';\nconst parts = [];\nconst emit = () => {\n  if (!inScene) return;\n  const p = prose.replace(/[ \\t]+/g, ' ').trim();\n  const s = mapShort(character);\n  parts.push(n === 0 ? `- ${p} ${s} says: \"${dialog}\"` : `\\n\\n  - ${p} ${s} says: \"${dialog}\"`);\n  n++;\n};\nfor (const line of lines) {\n  if (/^## Scene/.test(line)) { emit(); inScene = true; prose = ''; character = ''; dialog = ''; continue; }\n  if (!inScene) continue;\n  if (/^\\*\\*Leading character:\\*\\*/.test(line)) { character = line.replace(/^\\*\\*Leading character:\\*\\*[ \\t]*/, ''); continue; }\n  if (/^\\*\\*Dialog:\\*\\*/.test(line)) { dialog = line.replace(/^\\*\\*Dialog:\\*\\*[ \\t]*/, '').trim().replace(/^\"|\"$/g, '').replace(/\\.$/, ''); continue; }\n  if (/^##/.test(line)) { emit(); inScene = false; continue; }\n  prose += ' ' + line;\n}\nemit();\nif (!parts.length) throw new Error('no scenes parsed from the story');\nconst plot = parts.join('');\nreturn [{ json: { plot, socialTitle, socialCaption, scenes: n, story } }];"
+      },
+      "notes": "The story markdown is preserved on this node's output — n8n's execution log is the story archive (the showrunner's stories/ equivalent)."
+    },
+    {
+      "id": "callEngine",
+      "name": "Call engine",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1600, 300],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000,
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.YAKYAK_ENGINE_URL || 'http://localhost:5678/webhook/yakyak-regen' }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { target: { mode: 'episode', campaignId: $env.BBN_CAMPAIGN_ID }, changes: { movie: Object.assign({ plot: $json.plot }, $env.BBN_SOUNDTRACK_AUDIO_PATH ? { soundtrackAudioPath: $env.BBN_SOUNDTRACK_AUDIO_PATH } : {}, $env.BBN_SOUNDTRACK_VOLUME ? { soundtrackVolume: Number($env.BBN_SOUNDTRACK_VOLUME) } : {}) }, chatWebhookUrl: '' } }}",
+        "options": { "timeout": 2700000 }
+      },
+      "notes": "Fires the generic YakYak engine in episode mode. Timeout 45 min — the engine only responds once the episode is generated AND rendered. Retry is safe: a re-run lands on the same unrendered slot. Announcement happens here (below), not in the engine."
+    },
+    {
+      "id": "setSocial",
+      "name": "Set social fields",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1800, 300],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($env.YAKYAK_API_BASE || 'https://api.yakyak.ai') }}/workflow/update-movie-social-description",
+        "sendHeaders": true,
+        "headerParameters": { "parameters": [ { "name": "Authorization", "value": "=Bearer {{ $env.YAKYAK_TOKEN }}" } ] },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ Object.assign({ movieId: $json.movieId }, $('Build story payload').first().json.socialTitle ? { socialTitle: $('Build story payload').first().json.socialTitle } : {}, $('Build story payload').first().json.socialCaption ? { socialDescription: $('Build story payload').first().json.socialCaption } : {}) }}",
+        "options": {}
+      },
+      "notes": "Showrunner parity: ≤50-char social title (from the story call) + headline-derived caption. onError=continue — cosmetic metadata must not kill a rendered episode."
+    },
+    {
+      "id": "announce",
+      "name": "Announce",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2000, 300],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.BBN_CHAT_WEBHOOK_URL }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { text: '🧱 BBN episode ready — \"' + ($('Build story payload').first().json.socialTitle || 'Latest Update') + '\": ' + $('Call engine').item.json.url } }}",
+        "options": {}
+      },
+      "notes": "Review-first output event (the safe default). Auto-posting to social is the deliberate next step — see integrations/n8n/docs/breaking_bricks_news.md §4.3."
+    }
+  ],
+  "connections": {
+    "Every morning": { "main": [ [ { "node": "Balance guard", "type": "main", "index": 0 } ] ] },
+    "Balance guard": { "main": [ [ { "node": "Fetch BBC", "type": "main", "index": 0 } ] ] },
+    "Fetch BBC": { "main": [ [ { "node": "Fetch CNN", "type": "main", "index": 0 } ] ] },
+    "Fetch CNN": { "main": [ [ { "node": "Fetch AJ", "type": "main", "index": 0 } ] ] },
+    "Fetch AJ": { "main": [ [ { "node": "Build prompt", "type": "main", "index": 0 } ] ] },
+    "Build prompt": { "main": [ [ { "node": "Write story (Claude)", "type": "main", "index": 0 } ] ] },
+    "Write story (Claude)": { "main": [ [ { "node": "Build story payload", "type": "main", "index": 0 } ] ] },
+    "Build story payload": { "main": [ [ { "node": "Call engine", "type": "main", "index": 0 } ] ] },
+    "Call engine": { "main": [ [ { "node": "Set social fields", "type": "main", "index": 0 } ] ] },
+    "Set social fields": { "main": [ [ { "node": "Announce", "type": "main", "index": 0 } ] ] }
+  }
+}
