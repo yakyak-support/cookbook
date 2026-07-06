@@ -1,0 +1,350 @@
+{
+  "name": "Lucky Day — daily episode (front-end for the YakYak engine)",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "executionTimeout": 3600
+  },
+  "nodes": [
+    {
+      "id": "schedule",
+      "name": "Every morning",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        300
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 6 * * *"
+            }
+          ]
+        }
+      },
+      "notes": "06:00 UTC daily — CADENCE=daily in show/LuckyDay/show.env (14 scenes/day is the priciest cadence here; switch to weekly if the token cost is too high). Use 'Test workflow' to fire a run by hand."
+    },
+    {
+      "id": "showConfig",
+      "name": "Show config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        200,
+        300
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "cfg-campaign",
+              "name": "campaignId",
+              "value": "",
+              "type": "string"
+            },
+            {
+              "id": "cfg-userid",
+              "name": "userId",
+              "value": "",
+              "type": "string"
+            },
+            {
+              "id": "cfg-mintoken",
+              "name": "minTokenBalance",
+              "value": 2000,
+              "type": "number"
+            },
+            {
+              "id": "cfg-apibase",
+              "name": "apiBase",
+              "value": "https://api.yakyak.ai",
+              "type": "string"
+            },
+            {
+              "id": "cfg-soundtra",
+              "name": "soundtrackAudioPath",
+              "value": "",
+              "type": "string"
+            },
+            {
+              "id": "cfg-soundtra",
+              "name": "soundtrackVolume",
+              "value": 30,
+              "type": "number"
+            },
+            {
+              "id": "cfg-chatwebh",
+              "name": "chatWebhookUrl",
+              "value": "",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "notes": "ALL per-show config lives here, on the canvas — the workflow reads no environment variables. Required: campaignId (a campaign the API credential's account owns) and userId (for the balance check). Optional: soundtrackAudioPath (empty = skip the pin), chatWebhookUrl (empty = no announcement). No Anthropic credential needed — this show is fully computed."
+    },
+    {
+      "id": "fetchUser",
+      "name": "Fetch user",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        400,
+        300
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.apiBase }}/users/{{ $json.userId }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "credentials": {
+        "httpBearerAuth": {
+          "name": "YakYak API"
+        }
+      },
+      "notes": "Same 'YakYak API' Bearer credential as the engine — no token on the canvas or in env. onError=continue so Balance guard can report a clear error instead of a bare 404."
+    },
+    {
+      "id": "balanceGuard",
+      "name": "Balance guard",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        600,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Abort BEFORE burning a partial episode — an episode renders every scene (💸).\n// Mirrors MIN_TOKEN_BALANCE=2000 in show/LuckyDay/show.env.\n// Doubles as the config preflight, so an unfilled Show config fails here in\n// seconds — not after the story step.\nconst cfg = $('Show config').first().json;\nif (!cfg.campaignId) throw new Error('Show config: campaignId is empty — set it to a campaign id the API credential\\'s account owns');\nif (!cfg.userId) throw new Error('Show config: userId is empty — set it to the YakYak user id the API credential belongs to');\nconst user = $json;\nif (user.tokenBalance === undefined) throw new Error('could not fetch the user record — check Show config userId and the \"YakYak API\" credential (' + (user.error?.message || 'no tokenBalance in response') + ')');\nconst balance = Number(user.tokenBalance || 0);\nconst min = Number(cfg.minTokenBalance || 2000);\nif (balance < min) throw new Error('token balance ' + balance + ' is below the ' + min + ' minimum — top up before generating an episode');\nreturn [{ json: { balance } }];"
+      }
+    },
+    {
+      "id": "computeStory",
+      "name": "Compute story",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        800,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Deterministic daily story — JS port of show/LuckyDay/compute.py, replacing\n// the whole prompt/model stage: no Claude call, no Anthropic credential, no\n// network. Same 14-scene structure: Mandarin Dialog lines (subtitled in brush\n// calligraphy), English prose (it feeds the image prompts), no trailing period.\n// The day's stem/branch/element use the SAME proleptic-Gregorian ordinal as\n// compute.py (so they match a showrunner run); word-bank picks are keyed by\n// FNV-1a instead of Python's sha256, so the WORDING differs — but it is equally\n// deterministic (same date in -> same story out). Same almanac caveat as the\n// original: the cycle is correct, the absolute phase is not anchored to a real\n// Tong Shu epoch.\nconst MASTER = 'The Feng Shui Master';\n// (cast name [EN, matches the alias map], 汉字, 地支 branch) in Earthly-Branch order\nconst ANIMALS = [\n  ['Rat', '鼠', '子'],\n  ['Ox', '牛', '丑'],\n  ['Tiger', '虎', '寅'],\n  ['Rabbit', '兔', '卯'],\n  ['Dragon', '龙', '辰'],\n  ['Snake', '蛇', '巳'],\n  ['Horse', '马', '午'],\n  ['Goat', '羊', '未'],\n  ['Monkey', '猴', '申'],\n  ['Rooster', '鸡', '酉'],\n  ['Dog', '狗', '戌'],\n  ['Pig', '猪', '亥'],\n];\nconst STEMS = ['甲', '乙', '丙', '丁', '戊', '己', '庚', '辛', '壬', '癸'];\nconst ELEMENTS = [['金', 'Metal'], ['木', 'Wood'], ['水', 'Water'], ['火', 'Fire'], ['土', 'Earth']];\nconst YI = ['宜守成', '宜求财', '宜会友', '宜养气', '宜进取', '宜行善', '宜整理', '宜早眠'];\nconst JI = ['忌冲动', '忌轻信', '忌远行', '忌动土', '忌借贷', '忌口舌', '忌贪进', '忌熬夜'];\nconst DIRECTIONS = ['东', '南', '西', '北', '东南', '西南', '东北', '西北'];\nconst DIR_EN = { '东': 'east', '南': 'south', '西': 'west', '北': 'north', '东南': 'southeast', '西南': 'southwest', '东北': 'northeast', '西北': 'northwest' };\nconst PACE = ['缓行', '三思', '从容', '谨慎'];\nconst GENERAL_YI = ['宜安神养气', '宜清心寡欲', '宜广结善缘', '宜守正持中', '宜居家静处', '宜布施积福'];\nconst BLESSINGS = [\n  '愿诸位顺遂安康，明日再会',\n  '心安即是福，明日再聚',\n  '守正得福，来日方长',\n  '愿君财源广进，诸事如意',\n  '静以养德，福自天来',\n  '今日已言，吉凶在心',\n];\nconst SETTINGS = [\n  'a moon-gate courtyard where incense smoke curls',\n  'a tea house balcony above a misted river',\n  'a stone garden raked into slow spirals',\n  'a red-lacquer hall hung with gold lanterns',\n  'a bamboo grove bending in a quiet wind',\n  'a temple threshold where koi circle a still pond',\n  'a mountain shrine wrapped in dawn cloud',\n  \"a scholar's study stacked with bound scrolls\",\n];\n\nfunction h32(s) { let h = 0x811c9dc5; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193); } return h >>> 0; }\nconst pickB = (bank, ...keys) => bank[h32(keys.join('|')) % bank.length];\n\nconst now = new Date();\nconst days = Math.floor(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) / 86400000);\nconst n = days + 719163; // Python date.toordinal() parity (1970-01-01 -> 719163)\nconst iso = now.toISOString().slice(0, 10);\nconst ts = now.toISOString();\n\nconst stem = STEMS[n % 10];\nconst branchIdx = n % 12;\nconst elemCn = ELEMENTS[n % 5][0], elemEn = ELEMENTS[n % 5][1];\nconst ruling = ANIMALS[branchIdx];            // the day's ruling animal (地支 of the day)\nconst clash = ANIMALS[(branchIdx + 6) % 12];  // the 冲 (clash) animal — caution today\nconst goodDir = pickB(DIRECTIONS, n, 'good-dir');\nconst badDir = pickB(DIRECTIONS.filter((x) => x !== goodDir), n, 'bad-dir');\n\nconst out = [];\nout.push('# Lucky Day — Daily Feng Shui Almanac');\nout.push('**Generated (UTC):** ' + ts);\nout.push('**For:** ' + iso + ' · 干支 ' + stem + ruling[2] + ' · ' + elemCn + '(' + elemEn + ') day');\nout.push('');\nout.push('## Headlines we drew from:');\nconst capBullet = '今日运势 Daily Feng Shui Almanac — a ' + elemEn + ' day ruled by the ' + ruling[0] + ' (' + ruling[1] + '); luck favors the ' + DIR_EN[goodDir] + ', caution for the ' + clash[0] + '. Find your sign 🧧';\nout.push('- ' + capBullet);\nfor (const [name, cn] of ANIMALS) out.push('- ' + name + ' (' + cn + '): ' + pickB(YI, n, name, 'yi'));\nout.push('');\n\nconst generalYi = pickB(GENERAL_YI, n, 'general-yi');\nconst pace = pickB(PACE, n, 'pace');\nout.push('## Scene 1 — The Feng Shui Master opens the day');\nout.push('**Leading character:** ' + MASTER);\nout.push('**Dialog:** \"今日' + stem + ruling[2] + elemCn + '日，' + generalYi + '，诸事' + pace + '；吉方在' + goodDir + '，凶方在' + badDir + '\"');\nout.push('');\nout.push('Interior of ' + pickB(SETTINGS, n, 'master-intro') + ', rendered as a traditional Chinese ink-wash (国画) painting — gold leaf on deep cinnabar red. The Feng Shui Master, a calm white-bearded sage in a slate-grey robe, faces the lens like a trusted teacher and reads the day\\'s almanac: a ' + elemEn + ' day under the ' + ruling[0] + '. A slow Ken Burns drift over rising incense smoke; the palette is red and gold, the mood unhurried and certain. This frame sets the tone for the twelve readings that follow.');\nout.push('');\n\nANIMALS.forEach((animal, offset) => {\n  const name = animal[0], cn = animal[1];\n  const yi = pickB(YI, n, name, 'yi');\n  const ji = pickB(JI, n, name, 'ji');\n  const direction = pickB(DIRECTIONS, n, name, 'dir');\n  const setting = pickB(SETTINGS, n, name, 'setting');\n  const note = name === ruling[0]\n    ? \"Today's ruling sign — its hour is auspicious. \"\n    : (name === clash[0] ? \"Today's clash sign — tread carefully and avoid big moves. \" : '');\n  out.push('## Scene ' + (offset + 2) + ' — ' + name + ' (' + cn + ')');\n  out.push('**Leading character:** ' + name);\n  out.push('**Dialog:** \"属' + cn + '者，' + yi + '，' + ji + '；' + direction + '方利财\"');\n  out.push('');\n  out.push('Interior/exterior: ' + setting + ', in traditional Chinese ink-wash (国画) style, gold accents on deep red. We find the ' + name + ' zodiac avatar (' + cn + ') — a dignified spirit-creature in red-and-gold silk — composed at the center of the frame. ' + note + 'The day is a ' + elemEn + ' day; the ' + name + ' receives its daily counsel, wealth gathering toward the ' + DIR_EN[direction] + '. A slow contemplative Ken Burns drift; auspicious clouds and a single gold seal settle as the reading lands. The drama is quiet and internal — a daily omen the viewer recognizes for their own sign.');\n  out.push('');\n});\n\nout.push('## Scene 14 — The Feng Shui Master closes the day');\nout.push('**Leading character:** ' + MASTER);\nout.push('**Dialog:** \"' + pickB(BLESSINGS, n, 'blessing') + '\"');\nout.push('');\nout.push('Exterior of ' + pickB(SETTINGS, n, 'master-outro') + ' at dusk, the same ink-wash (国画) red-and-gold palette. The Feng Shui Master draws the twelve readings back together, lowers both hands in a calm blessing, and a single gold lantern lifts as the incense smoke thins. A slow Ken Burns pull-back until the whole courtyard is in frame — a quiet, certain button on the day.');\n\nconst story = out.join('\\n').replace(/\\s+$/, '') + '\\n';\nconst socialTitle = ('今日运势 Lucky Day — ' + iso).slice(0, 50);\nconst socialCaption = capBullet.slice(0, 400);\nreturn [{ json: { story, socialTitle, socialCaption, ganzhi: stem + ruling[2], element: elemEn } }];"
+      },
+      "notes": "The whole story stage: deterministic, offline, model-free. Mandarin Dialog lines (the campaign renders them in brush-calligraphy subtitles); English prose for the image prompts."
+    },
+    {
+      "id": "storyPayload",
+      "name": "Build story payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1000,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Port of storyToDescription() from show/showrunner/story-format.js: drop\n// everything before the first '## Scene', collapse each scene's prose to one\n// line, append `<Char> says: \"<dialog>\"`, mapping names through the cast map\n// (CAST_ALIASES in show/LuckyDay/show.env). The story markdown comes from the\n// deterministic Compute story node (no model in this show), which also\n// supplies the social title + caption.\nconst story = String($json.story || '');\nif (!/## Scene/.test(story)) throw new Error('Compute story emitted no \"## Scene\" blocks — not a story');\nconst socialTitle = String($json.socialTitle || '').slice(0, 50);\nconst socialCaption = String($json.socialCaption || '').slice(0, 400);\n\nconst ALIASES = {\"The Feng Shui Master\":\"The Feng Shui Master\",\"Rat\":\"Rat\",\"Ox\":\"Ox\",\"Tiger\":\"Tiger\",\"Rabbit\":\"Rabbit\",\"Dragon\":\"Dragon\",\"Snake\":\"Snake\",\"Horse\":\"Horse\",\"Goat\":\"Goat\",\"Monkey\":\"Monkey\",\"Rooster\":\"Rooster\",\"Dog\":\"Dog\",\"Pig\":\"Pig\"};\nconst mapShort = (name) => { for (const k of Object.keys(ALIASES)) if (name.includes(k)) return ALIASES[k]; return String(name).trim(); };\n\nconst lines = story.split(/\\r?\\n/);\nlet inScene = false, n = 0, prose = '', character = '', dialog = '';\nconst parts = [];\nconst emit = () => {\n  if (!inScene) return;\n  const p = prose.replace(/[ \\t]+/g, ' ').trim();\n  const s = mapShort(character);\n  parts.push(n === 0 ? '- ' + p + ' ' + s + ' says: \"' + dialog + '\"' : '\\n\\n  - ' + p + ' ' + s + ' says: \"' + dialog + '\"');\n  n++;\n};\nfor (const line of lines) {\n  if (/^## Scene/.test(line)) { emit(); inScene = true; prose = ''; character = ''; dialog = ''; continue; }\n  if (!inScene) continue;\n  if (/^\\*\\*Leading character:\\*\\*/.test(line)) { character = line.replace(/^\\*\\*Leading character:\\*\\*[ \\t]*/, ''); continue; }\n  if (/^\\*\\*Dialog:\\*\\*/.test(line)) { dialog = line.replace(/^\\*\\*Dialog:\\*\\*[ \\t]*/, '').trim().replace(/^\"|\"$/g, '').replace(/[.。]$/, ''); continue; }\n  if (/^##/.test(line)) { emit(); inScene = false; continue; }\n  prose += ' ' + line;\n}\nemit();\nif (!parts.length) throw new Error('no scenes parsed from the story');\nconst plot = parts.join('');\nreturn [{ json: { plot, socialTitle, socialCaption, scenes: n, story } }];"
+      },
+      "notes": "The story markdown is preserved on this node's output — n8n's execution log is the story archive (the showrunner's stories/ equivalent)."
+    },
+    {
+      "id": "enginePayload",
+      "name": "Build engine payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Shape the engine call: episode mode in the pinned Lucky Day campaign, the\n// story as the new episode's plot, optional soundtrack pin. The engine's\n// sub-workflow trigger is passthrough — this item IS the payload (same shape\n// as the engine webhook's body). Re-delivered same-day stories are diff-aware\n// on the engine side, so a duplicate run doesn't re-bill unchanged work.\nconst cfg = $('Show config').first().json;\nif (!cfg.campaignId) throw new Error('Show config: campaignId is empty');\nconst movie = { plot: $json.plot };\nif (cfg.soundtrackAudioPath) {\n  movie.soundtrackAudioPath = cfg.soundtrackAudioPath;\n  if (cfg.soundtrackVolume) movie.soundtrackVolume = Number(cfg.soundtrackVolume);\n}\nreturn [{ json: { target: { mode: 'episode', campaignId: cfg.campaignId }, changes: { movie }, chatWebhookUrl: '' } }];"
+      }
+    },
+    {
+      "id": "callEngine",
+      "name": "Call engine",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        1400,
+        300
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000,
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "",
+          "cachedResultName": "YakYak engine — resolve target, patch or new episode, render, post"
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "notes": "Fires the generic YakYak engine in episode mode. The engine only responds once the episode is generated AND rendered. Retry is safe: a re-run lands on the same unrendered slot. Announcement happens here (below), not in the engine. A Lucky Day episode is 14 scenes (💸) — trim the animal loop in Compute story or slow the cron if daily cost is too high."
+    },
+    {
+      "id": "setSocial",
+      "name": "Set social fields",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1600,
+        300
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Show config').first().json.apiBase }}/workflow/update-movie-social-description",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ Object.assign({ movieId: $json.movieId }, $('Build story payload').first().json.socialTitle ? { socialTitle: $('Build story payload').first().json.socialTitle } : {}, $('Build story payload').first().json.socialCaption ? { socialDescription: $('Build story payload').first().json.socialCaption } : {}) }}",
+        "options": {},
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth"
+      },
+      "notes": "Showrunner parity: ≤50-char social title + caption. onError=continue — cosmetic metadata must not kill a rendered episode.",
+      "credentials": {
+        "httpBearerAuth": {
+          "name": "YakYak API"
+        }
+      }
+    },
+    {
+      "id": "announce",
+      "name": "Announce",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1800,
+        300
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Show config').first().json.chatWebhookUrl }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { text: '🧧 Lucky Day episode ready — \"' + ($('Build story payload').first().json.socialTitle || 'Daily almanac') + '\": ' + $('Call engine').first().json.url } }}",
+        "options": {}
+      },
+      "notes": "Review-first output event (the safe default). chatWebhookUrl empty → this node errors and the run still succeeds (onError=continue). Auto-posting to social is the deliberate next step — see the BBN guide §4.3."
+    }
+  ],
+  "connections": {
+    "Every morning": {
+      "main": [
+        [
+          {
+            "node": "Show config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Show config": {
+      "main": [
+        [
+          {
+            "node": "Fetch user",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch user": {
+      "main": [
+        [
+          {
+            "node": "Balance guard",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Balance guard": {
+      "main": [
+        [
+          {
+            "node": "Compute story",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compute story": {
+      "main": [
+        [
+          {
+            "node": "Build story payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build story payload": {
+      "main": [
+        [
+          {
+            "node": "Build engine payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build engine payload": {
+      "main": [
+        [
+          {
+            "node": "Call engine",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call engine": {
+      "main": [
+        [
+          {
+            "node": "Set social fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set social fields": {
+      "main": [
+        [
+          {
+            "node": "Announce",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}

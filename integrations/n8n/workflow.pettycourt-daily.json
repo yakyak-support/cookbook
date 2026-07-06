@@ -1,0 +1,620 @@
+{
+  "name": "Petty Court — daily episode (front-end for the YakYak engine)",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "executionTimeout": 3600
+  },
+  "nodes": [
+    {
+      "id": "schedule",
+      "name": "Every morning",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        300
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 6 * * *"
+            }
+          ]
+        }
+      },
+      "notes": "06:00 UTC daily — CADENCE=daily in show/PettyCourt/show.env; top.json?t=day catches yesterday's winners. Use 'Test workflow' to fire a run by hand."
+    },
+    {
+      "id": "showConfig",
+      "name": "Show config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        200,
+        300
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "cfg-campaign",
+              "name": "campaignId",
+              "value": "",
+              "type": "string"
+            },
+            {
+              "id": "cfg-userid",
+              "name": "userId",
+              "value": "",
+              "type": "string"
+            },
+            {
+              "id": "cfg-mintoken",
+              "name": "minTokenBalance",
+              "value": 2000,
+              "type": "number"
+            },
+            {
+              "id": "cfg-apibase",
+              "name": "apiBase",
+              "value": "https://api.yakyak.ai",
+              "type": "string"
+            },
+            {
+              "id": "cfg-soundtra",
+              "name": "soundtrackAudioPath",
+              "value": "",
+              "type": "string"
+            },
+            {
+              "id": "cfg-soundtra",
+              "name": "soundtrackVolume",
+              "value": 45,
+              "type": "number"
+            },
+            {
+              "id": "cfg-chatwebh",
+              "name": "chatWebhookUrl",
+              "value": "",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "notes": "ALL per-show config lives here, on the canvas — the workflow reads no environment variables. Required: campaignId (a campaign the API credential's account owns) and userId (for the balance check). Optional: soundtrackAudioPath (empty = skip the pin), chatWebhookUrl (empty = no announcement)."
+    },
+    {
+      "id": "fetchUser",
+      "name": "Fetch user",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        400,
+        300
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.apiBase }}/users/{{ $json.userId }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "credentials": {
+        "httpBearerAuth": {
+          "name": "YakYak API"
+        }
+      },
+      "notes": "Same 'YakYak API' Bearer credential as the engine — no token on the canvas or in env. onError=continue so Balance guard can report a clear error instead of a bare 404."
+    },
+    {
+      "id": "balanceGuard",
+      "name": "Balance guard",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        600,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Abort BEFORE burning a partial episode — an episode renders every scene (💸).\n// Mirrors MIN_TOKEN_BALANCE=2000 in show/PettyCourt/show.env.\n// Doubles as the config preflight, so an unfilled Show config fails here in\n// seconds — not after the story step.\nconst cfg = $('Show config').first().json;\nif (!cfg.campaignId) throw new Error('Show config: campaignId is empty — set it to a campaign id the API credential\\'s account owns');\nif (!cfg.userId) throw new Error('Show config: userId is empty — set it to the YakYak user id the API credential belongs to');\nconst user = $json;\nif (user.tokenBalance === undefined) throw new Error('could not fetch the user record — check Show config userId and the \"YakYak API\" credential (' + (user.error?.message || 'no tokenBalance in response') + ')');\nconst balance = Number(user.tokenBalance || 0);\nconst min = Number(cfg.minTokenBalance || 2000);\nif (balance < min) throw new Error('token balance ' + balance + ' is below the ' + min + ' minimum — top up before generating an episode');\nreturn [{ json: { balance } }];"
+      }
+    },
+    {
+      "id": "fetchAita",
+      "name": "Fetch r/AmItheAsshole",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        800,
+        300
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "https://www.reddit.com/r/AmItheAsshole/top.json?t=day&limit=15",
+        "options": {
+          "timeout": 30000
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "yakyak-cookbook:petty-court-n8n:v1.0 (by /u/yakyak-support)"
+            }
+          ]
+        }
+      },
+      "onError": "continueRegularOutput",
+      "notes": "Reddit's public no-key JSON. A descriptive User-Agent avoids the blanket 429 Reddit gives default clients. All listings are continue-on-error — Build prompt aborts only if EVERY source failed."
+    },
+    {
+      "id": "fetchAitah",
+      "name": "Fetch r/AITAH",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1000,
+        300
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "https://www.reddit.com/r/AITAH/top.json?t=day&limit=15",
+        "options": {
+          "timeout": 30000
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "yakyak-cookbook:petty-court-n8n:v1.0 (by /u/yakyak-support)"
+            }
+          ]
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "fetchPetty",
+      "name": "Fetch r/pettyrevenge",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1200,
+        300
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "https://www.reddit.com/r/pettyrevenge/top.json?t=day&limit=15",
+        "options": {
+          "timeout": 30000
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "yakyak-cookbook:petty-court-n8n:v1.0 (by /u/yakyak-support)"
+            }
+          ]
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "fetchEntitled",
+      "name": "Fetch r/EntitledPeople",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1400,
+        300
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "https://www.reddit.com/r/EntitledPeople/top.json?t=day&limit=15",
+        "options": {
+          "timeout": 30000
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "yakyak-cookbook:petty-court-n8n:v1.0 (by /u/yakyak-support)"
+            }
+          ]
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "fetchOldReddit",
+      "name": "Fetch old.reddit fallback",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1600,
+        300
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "https://old.reddit.com/r/AmItheAsshole/top.json?t=day&limit=15",
+        "options": {
+          "timeout": 30000
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "yakyak-cookbook:petty-court-n8n:v1.0 (by /u/yakyak-support)"
+            }
+          ]
+        }
+      },
+      "onError": "continueRegularOutput",
+      "notes": "old.reddit is more lenient with rate limits — the retry host from show/PettyCourt/prompt.md."
+    },
+    {
+      "id": "fetchPullpush",
+      "name": "Fetch pullpush fallback",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1800,
+        300
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "https://api.pullpush.io/reddit/search/submission/?subreddit=AmItheAsshole&sort=desc&sort_type=score&size=20&over_18=false&is_self=true",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "onError": "continueRegularOutput",
+      "notes": "Free no-key Reddit mirror — the archive fallback. Only consulted when every live listing failed."
+    },
+    {
+      "id": "buildPrompt",
+      "name": "Build prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2000,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const TPL = \"You are the head writer for \\\"Petty Court\\\", a daily short-form comedy series that\\nturns a real Reddit drama thread into a small-claims-TV sitcom. A recurring Judge\\npresides; a fixed roster of archetype characters plays the day's plaintiff and\\ndefendant. Your job in this run is to produce ONE story.\\n\\nSTEP 1 — Read the source. The day's top posts from the drama subreddits are\\nincluded below (already fetched and pre-screened for SFW; upvote counts and\\nverdict flairs included). Never invent a Reddit story or fabricate an upvote count.\\n\\nSTEP 2 — Pick & screen the case (in your reasoning):\\n  - Choose the highest-upvote post that is: clearly SFW (skip anything involving\\n    sex, abuse, self-harm, minors in distress, or graphic content), has a\\n    self-contained two-party conflict, and is fun to dramatize. The upvote count\\n    IS your virality pre-screen — prefer the most-upvoted SFW story.\\n  - Identify the TWO parties in conflict and the petty stakes (who did what to whom).\\n  - Note the subreddit's verdict flair if present (\\\"Not the A-hole\\\", etc.) — this\\n    becomes the Judge's ruling in the final scene.\\n\\nSTEP 3 — TRANSFORM, don't copy. This is a legal/SFW requirement: PARAPHRASE the\\nstory into your own words and recast the real people as the archetypes below. Change\\nnames, jobs, and incidental details; keep only the comedic shape of the dispute.\\nNever quote the Reddit text verbatim. Keep it SFW and punch up, not down.\\n\\nCAST (only these may speak; each scene's \\\"leading character\\\" must be EXACTLY one of\\nthese full names). Cast the day's two parties onto whichever 2 archetypes fit best:\\n  - Judge Justine Payne — the sharp-tongued small-claims judge who runs the show.\\n    MUST be the leading character in Scene 1 (gavels court into session, sets up the\\n    case) and Scene 8 (delivers the VERDICT). Dry, withering, zero patience.\\n  - Marlene the Monster-in-Law — immaculate, passive-aggressive overbearing in-law /\\n    parent; weaponized casseroles and boundaries she does not respect.\\n  - Trevor the Freeloader — couch-surfing slacker roommate / relative; eats your\\n    food, pays no rent, somehow the victim in his own mind.\\n  - Bridezilla Bree — wild-eyed bride / party diva; the day is all about her and she\\n    will ruin it for everyone to prove it.\\n  - Dex the Petty Ex — smug, scheming ex-partner; screenshots everything, returns\\n    your stuff slightly damaged.\\n  - Reasonable Ray — the level-headed everyman, usually the one in the right (the\\n    \\\"Not the Asshole\\\"); the audience surrogate who just wanted the dishes done.\\n\\nUse the Judge plus the 2 archetypes that best match the real story's two parties.\\nYou do NOT need to use all six; reuse the best-fit pair across the middle scenes.\\n\\nTONE: Daytime-TV courtroom sitcom / dark comedy. The real drama drives the beats;\\nthe comedy comes from the archetypes' voices and reaction shots. No slurs, nothing\\nexplicit, no real names. The verdict is the screenshot-able payoff.\\n\\nPER-SCENE REQUIREMENTS:\\n  - Roughly 200 words of prose describing the scene's visuals, action, and\\n    atmosphere (the over-the-top courtroom, faux-wood bench, the litigants' faces,\\n    the reaction shots). Write it as a director would brief a camera op. Lean on\\n    bold, high-contrast comic staging and comedic zoom punches.\\n  - Exactly ONE spoken dialog line per scene, 8–12 words, attributed to the scene's\\n    leading character. The line should land — a deadpan ruling, an outraged gasp, a\\n    petty flex. Do NOT end the dialog line with a period (\\\"!\\\" or \\\"?\\\" are fine).\\n  - Leading character must be from the cast. No other characters speak on the page.\\n\\nSTRUCTURE: Exactly 8 scenes.\\n  - Scene 1: Judge Justine Payne calls court to order and lays out today's case.\\n  - Scenes 2–7: the dispute, dramatized — the two cast archetypes testify, accuse,\\n    and have their reaction shots; escalate the pettiness to a comedic peak.\\n  - Scene 8: Judge Justine Payne delivers the verdict (use the subreddit's ruling if\\n    there was one) and bangs the gavel.\\n\\nSTEP 4 — Reply with ONLY the markdown document below — no preamble, no\\ntriple-backtick fences, nothing after it:\\n\\n  # Petty Court — Daily Docket\\n  **Generated (UTC):** {{TS}}\\n  **Source:** r/<subreddit> top-of-day (paraphrased & dramatized, SFW)\\n\\n  ## Social title: <punchy title for social posting, 50 characters MAX>\\n\\n  ## Headlines we drew from:\\n  - <one bullet naming the paraphrased case + its upvote count, e.g. \\\"MIL hijacked the baby-name reveal (r/AmItheAsshole, 14.2k upvotes)\\\">\\n  - <e.g. \\\"Subreddit verdict: Not the A-hole\\\">\\n\\n  ## Scene 1 — <short title>\\n  **Leading character:** Judge Justine Payne\\n  **Dialog:** \\\"<8–12 word line>\\\"\\n\\n  <~200 words of scene prose>\\n\\n  ## Scene 2 — <short title>\\n  **Leading character:** <full name from cast>\\n  **Dialog:** \\\"<8–12 word line>\\\"\\n\\n  <~200 words of scene prose>\\n\\n  ... (continue through Scene 8, which is again Judge Justine Payne) ...\\n\\n===== TODAY'S TOP POSTS =====\\n\\n{{CASES}}\";\n\n// The Petty Court head-writer prompt, adapted from show/PettyCourt/prompt.md.\n// STEP 1's agentic WebFetch is replaced by the listings the fetch nodes just\n// pulled; the SFW pre-screen (over_18 filter, minimum body length, score sort)\n// runs here in code, then Claude picks the best case from the top candidates —\n// same division of labor as the showrunner, minus the live fetching. STEP 4's\n// file-write becomes \"reply with only the markdown\" + a '## Social title:' line.\nconst ts = new Date().toISOString();\nconst posts = [];\nconst seen = new Set();\nconst push = (d) => {\n  if (!d || !d.title) return;\n  if (d.over_18) return; // SFW pre-screen\n  const body = String(d.selftext || '');\n  if (body.length < 200) return; // need a self-contained story to paraphrase\n  const key = (d.subreddit || '') + '|' + d.title;\n  if (seen.has(key)) return;\n  seen.add(key);\n  posts.push({ subreddit: d.subreddit, title: d.title, score: Number(d.score || 0), comments: Number(d.num_comments || 0), flair: d.link_flair_text || '', body: body.slice(0, 3000) });\n};\nconst grabListing = (node) => { try { const x = $(node).first().json; const ch = x && x.data && x.data.children; if (Array.isArray(ch)) for (const c of ch) push(c.data); } catch (e) {} };\nfor (const n of ['Fetch r/AmItheAsshole', 'Fetch r/AITAH', 'Fetch r/pettyrevenge', 'Fetch r/EntitledPeople', 'Fetch old.reddit fallback']) grabListing(n);\nif (!posts.length) { try { const x = $('Fetch pullpush fallback').first().json; if (x && Array.isArray(x.data)) for (const d of x.data) push(d); } catch (e) {} }\nif (!posts.length) throw new Error('no usable SFW posts from Reddit or pullpush — aborting (no material for an episode)');\nposts.sort((a, b) => b.score - a.score);\nconst block = posts.slice(0, 8).map((p, i) =>\n  '#' + (i + 1) + ' [r/' + p.subreddit + ' · ' + p.score + ' upvotes · ' + p.comments + ' comments · flair: ' + (p.flair || '—') + ']\\nTITLE: ' + p.title + '\\nBODY: ' + p.body\n).join('\\n\\n');\nconst fill = (t, map) => t.replace(/\\{\\{(\\w+)\\}\\}/g, (m, k) => (map[k] === undefined ? m : map[k]));\nconst prompt = fill(TPL, { TS: ts, CASES: block });\nreturn [{ json: { prompt, candidates: posts.length } }];"
+      },
+      "notes": "The SFW pre-screen (over_18, minimum body length, score sort) runs here; Claude picks the case from the top candidates and PARAPHRASES it — never verbatim."
+    },
+    {
+      "id": "writeStory",
+      "name": "Write story (Claude)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2200,
+        300
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { model: 'claude-opus-4-8', max_tokens: 16000, thinking: { type: 'adaptive' }, messages: [ { role: 'user', content: $json.prompt } ] } }}",
+        "options": {
+          "timeout": 600000
+        },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth"
+      },
+      "notes": "Messages API over raw HTTP (no SDK inside n8n). Auth via the 'Anthropic API key' Header Auth credential (header name x-api-key). Adaptive thinking; the story lands in the response's text block.",
+      "credentials": {
+        "httpHeaderAuth": {
+          "name": "Anthropic API key"
+        }
+      }
+    },
+    {
+      "id": "storyPayload",
+      "name": "Build story payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2400,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Extract the story markdown from the Claude response, then port of\n// storyToDescription() from show/showrunner/story-format.js: drop everything\n// before the first '## Scene', collapse each scene's prose to one line, append\n// `<Char> says: \"<dialog>\"`, mapping names through the cast map (CAST_ALIASES\n// in show/PettyCourt/show.env).\nconst resp = $json;\nif (resp.stop_reason === 'refusal') throw new Error('Claude declined the request (stop_reason: refusal)');\nconst story = (resp.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\\n');\nif (!/## Scene/.test(story)) throw new Error('Claude response contains no \"## Scene\" blocks — not a story');\n\n// ≤50-char social title from the requested '## Social title:' line\nlet socialTitle = '';\nconst mTitle = story.match(/^##\\s*Social title:\\s*(.+)$/mi);\nif (mTitle) socialTitle = [...mTitle[1].trim().replace(/^\"|\"$/g, '')].slice(0, 50).join('');\n\n// caption from the headlines bullets\nconst capLines = [];\nconst hm = story.match(/## Headlines we drew from:\\n([\\s\\S]*?)\\n##/);\nif (hm) for (const l of hm[1].split('\\n')) { const t = l.replace(/^-\\s*/, '').trim(); if (t) capLines.push(t); }\nconst socialCaption = capLines.slice(0, 6).join(' · ').slice(0, 400);\n\nconst ALIASES = {\"Judge Justine Payne\":\"Judge Justine Payne\",\"Marlene the Monster-in-Law\":\"Marlene the Monster-in-Law\",\"Trevor the Freeloader\":\"Trevor the Freeloader\",\"Bridezilla Bree\":\"Bridezilla Bree\",\"Dex the Petty Ex\":\"Dex the Petty Ex\",\"Reasonable Ray\":\"Reasonable Ray\"};\nconst mapShort = (name) => { for (const k of Object.keys(ALIASES)) if (name.includes(k)) return ALIASES[k]; return String(name).trim(); };\n\nconst lines = story.split(/\\r?\\n/);\nlet inScene = false, n = 0, prose = '', character = '', dialog = '';\nconst parts = [];\nconst emit = () => {\n  if (!inScene) return;\n  const p = prose.replace(/[ \\t]+/g, ' ').trim();\n  const s = mapShort(character);\n  parts.push(n === 0 ? '- ' + p + ' ' + s + ' says: \"' + dialog + '\"' : '\\n\\n  - ' + p + ' ' + s + ' says: \"' + dialog + '\"');\n  n++;\n};\nfor (const line of lines) {\n  if (/^## Scene/.test(line)) { emit(); inScene = true; prose = ''; character = ''; dialog = ''; continue; }\n  if (!inScene) continue;\n  if (/^\\*\\*Leading character:\\*\\*/.test(line)) { character = line.replace(/^\\*\\*Leading character:\\*\\*[ \\t]*/, ''); continue; }\n  if (/^\\*\\*Dialog:\\*\\*/.test(line)) { dialog = line.replace(/^\\*\\*Dialog:\\*\\*[ \\t]*/, '').trim().replace(/^\"|\"$/g, '').replace(/[.。]$/, ''); continue; }\n  if (/^##/.test(line)) { emit(); inScene = false; continue; }\n  prose += ' ' + line;\n}\nemit();\nif (!parts.length) throw new Error('no scenes parsed from the story');\nconst plot = parts.join('');\nreturn [{ json: { plot, socialTitle, socialCaption, scenes: n, story } }];"
+      },
+      "notes": "The story markdown is preserved on this node's output — n8n's execution log is the story archive (the showrunner's stories/ equivalent)."
+    },
+    {
+      "id": "enginePayload",
+      "name": "Build engine payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2600,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Shape the engine call: episode mode in the pinned Petty Court campaign, the\n// story as the new episode's plot, optional soundtrack pin. The engine's\n// sub-workflow trigger is passthrough — this item IS the payload (same shape\n// as the engine webhook's body). Re-delivered same-day stories are diff-aware\n// on the engine side, so a duplicate run doesn't re-bill unchanged work.\nconst cfg = $('Show config').first().json;\nif (!cfg.campaignId) throw new Error('Show config: campaignId is empty');\nconst movie = { plot: $json.plot };\nif (cfg.soundtrackAudioPath) {\n  movie.soundtrackAudioPath = cfg.soundtrackAudioPath;\n  if (cfg.soundtrackVolume) movie.soundtrackVolume = Number(cfg.soundtrackVolume);\n}\nreturn [{ json: { target: { mode: 'episode', campaignId: cfg.campaignId }, changes: { movie }, chatWebhookUrl: '' } }];"
+      }
+    },
+    {
+      "id": "callEngine",
+      "name": "Call engine",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        2800,
+        300
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000,
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "",
+          "cachedResultName": "YakYak engine — resolve target, patch or new episode, render, post"
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "notes": "Fires the generic YakYak engine in episode mode. The engine only responds once the episode is generated AND rendered. Retry is safe: a re-run lands on the same unrendered slot. Announcement happens here (below), not in the engine."
+    },
+    {
+      "id": "setSocial",
+      "name": "Set social fields",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3000,
+        300
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Show config').first().json.apiBase }}/workflow/update-movie-social-description",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ Object.assign({ movieId: $json.movieId }, $('Build story payload').first().json.socialTitle ? { socialTitle: $('Build story payload').first().json.socialTitle } : {}, $('Build story payload').first().json.socialCaption ? { socialDescription: $('Build story payload').first().json.socialCaption } : {}) }}",
+        "options": {},
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth"
+      },
+      "notes": "Showrunner parity: ≤50-char social title + caption. onError=continue — cosmetic metadata must not kill a rendered episode.",
+      "credentials": {
+        "httpBearerAuth": {
+          "name": "YakYak API"
+        }
+      }
+    },
+    {
+      "id": "announce",
+      "name": "Announce",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3200,
+        300
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Show config').first().json.chatWebhookUrl }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { text: '⚖️ Petty Court episode ready — \"' + ($('Build story payload').first().json.socialTitle || 'Daily Docket') + '\": ' + $('Call engine').first().json.url } }}",
+        "options": {}
+      },
+      "notes": "Review-first output event (the safe default). chatWebhookUrl empty → this node errors and the run still succeeds (onError=continue). Auto-posting to social is the deliberate next step — see the BBN guide §4.3."
+    }
+  ],
+  "connections": {
+    "Every morning": {
+      "main": [
+        [
+          {
+            "node": "Show config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Show config": {
+      "main": [
+        [
+          {
+            "node": "Fetch user",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch user": {
+      "main": [
+        [
+          {
+            "node": "Balance guard",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Balance guard": {
+      "main": [
+        [
+          {
+            "node": "Fetch r/AmItheAsshole",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch r/AmItheAsshole": {
+      "main": [
+        [
+          {
+            "node": "Fetch r/AITAH",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch r/AITAH": {
+      "main": [
+        [
+          {
+            "node": "Fetch r/pettyrevenge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch r/pettyrevenge": {
+      "main": [
+        [
+          {
+            "node": "Fetch r/EntitledPeople",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch r/EntitledPeople": {
+      "main": [
+        [
+          {
+            "node": "Fetch old.reddit fallback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch old.reddit fallback": {
+      "main": [
+        [
+          {
+            "node": "Fetch pullpush fallback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch pullpush fallback": {
+      "main": [
+        [
+          {
+            "node": "Build prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build prompt": {
+      "main": [
+        [
+          {
+            "node": "Write story (Claude)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write story (Claude)": {
+      "main": [
+        [
+          {
+            "node": "Build story payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build story payload": {
+      "main": [
+        [
+          {
+            "node": "Build engine payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build engine payload": {
+      "main": [
+        [
+          {
+            "node": "Call engine",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call engine": {
+      "main": [
+        [
+          {
+            "node": "Set social fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set social fields": {
+      "main": [
+        [
+          {
+            "node": "Announce",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}

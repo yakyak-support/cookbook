@@ -20,7 +20,7 @@ The daily BBN run (`upload_to_yakyak.py --show show/BreakingBricksNews`, schedul
 | # | Showrunner step | n8n equivalent |
 | --- | --- | --- |
 | 1 | **Cron fires** (plan_due_shows.sh picks daily shows) | **Schedule Trigger** node (cron) |
-| 2 | **Token-balance guard** — `GET /users/{userId}`, abort below `MIN_TOKEN_BALANCE=2000` | small **Code/IF** guard node (optional but recommended) |
+| 2 | **Token-balance guard** — `GET /users/{userId}`, abort below `MIN_TOKEN_BALANCE=2000` | **Fetch user** (HTTP, `YakYak API` credential) + **Balance guard** Code check |
 | 3 | **Write the story** — `claude -p` runs [`prompt.md`](../../../show/BreakingBricksNews/prompt.md): WebFetch BBC RSS + CNN Lite + Al Jazeera, keep 24 h items, weave 3–6 into a ten-scene script (Bob Brikko opens and closes; one 8–12-word dialog line per scene, no trailing period) | **3 HTTP fetch nodes + 1 Claude API node** (see §3 — the one real adaptation) |
 | 4 | **Story → plot text** — `storyToDescription()` collapses `## Scene N` blocks into one plot string, applying `CAST_ALIASES` (`Khamenei→Mojtaba`, …) | **Build story payload** Code node — direct port (§3) |
 | 5 | **Pick the episode slot** — lowest `(season, episode)` with empty `renderedMovieUrl`; `create-new-season` when all rendered; switch campaign to `basic` mode | ✅ **already in the engine** — Resolve target, `mode: "episode"` |
@@ -68,31 +68,40 @@ finished `movieId`/`url` back synchronously and can finalize.
 
 ## 3. The BBN front-end workflow, node by node (as built)
 
-The importable file is [`workflow.bbn-daily.json`](../workflow.bbn-daily.json) — 12 nodes,
-one straight line:
+The importable file is [`workflow.bbn-daily.json`](../workflow.bbn-daily.json) — 14 nodes,
+one straight line. **No environment variables anywhere:** per-show config lives in the
+**Show config** Set node on the canvas, and both authenticated calls use n8n credentials —
+same rule as the engine, so a stock n8n container runs it unmodified:
 
 ```
 Every morning (cron 0 6 * * *)
- └► Balance guard          Code — decode userId from PAT, GET /users/{userId},
- │                          throw if tokenBalance < BBN_MIN_TOKEN_BALANCE (2000)
+ └► Show config            Set — ALL per-show config on the canvas: campaignId, userId,
+ │                          minTokenBalance (2000), apiBase, optional soundtrack pin,
+ │                          optional chatWebhookUrl (§5 for the field table)
+ └► Fetch user             HTTP — GET /users/{userId}, 'YakYak API' Bearer credential
+ │                          (the same one the engine uses)
+ └► Balance guard          Code — config preflight (campaignId/userId filled?) + throw
+ │                          if tokenBalance < minTokenBalance
  └► Fetch BBC / CNN / AJ   3× HTTP, text response, 30 s timeout, continue-on-error
  └► Build prompt           Code — the adapted prompt.md with sources inlined (15 kB/source
  │                          cap); aborts if ALL THREE sources failed
  └► Write story (Claude)   HTTP — POST api.anthropic.com/v1/messages, model
  │                          claude-opus-4-8, max_tokens 16000, adaptive thinking,
- │                          x-api-key + anthropic-version headers, 10 min timeout
+ │                          'Anthropic API key' Header Auth credential (header name
+ │                          x-api-key) + anthropic-version header, 10 min timeout
  └► Build story payload    Code — storyToDescription() port (cast aliases, one-line prose,
  │                          dialog append, no trailing period), ≤50-char social title from
  │                          the story's '## Social title:' line, headline caption
- └► Build engine payload   Code — shape the engine call: mode: episode, pinned
- │                          BBN_CAMPAIGN_ID, the story as changes.movie.plot, optional
+ └► Build engine payload   Code — shape the engine call: mode: episode, Show config's
+ │                          campaignId, the story as changes.movie.plot, optional
  │                          soundtrack pin fields
  └► Call engine            Execute Workflow — the yakyak-engine sub-workflow; waits for
  │                          it to finish (safe to re-run: the engine's slot picker lands
  │                          on the same unrendered episode)
- └► Set social fields      HTTP — update-movie-social-description, continue-on-error
- └► Announce               HTTP — post title + movie URL to BBN_CHAT_WEBHOOK_URL,
-                            continue-on-error
+ └► Set social fields      HTTP — update-movie-social-description, 'YakYak API'
+ │                          credential, continue-on-error
+ └► Announce               HTTP — post title + movie URL to Show config's chatWebhookUrl,
+                            continue-on-error (empty URL = node fails, run stays green)
 ```
 
 Design notes, in the order they'll matter:
@@ -118,11 +127,11 @@ Design notes, in the order they'll matter:
 
   ```jsonc
   {
-    "target": { "mode": "episode", "campaignId": "<BBN_CAMPAIGN_ID>" },  // pinned — a
+    "target": { "mode": "episode", "campaignId": "<Show config campaignId>" },  // pinned — a
     "changes": {                                    // production show never name-matches
       "movie": {
         "plot": "…parsed plot…",                    // title: the screenplay names it
-        "soundtrackAudioPath": "<BBN_SOUNDTRACK_AUDIO_PATH>",   // §4.1
+        "soundtrackAudioPath": "<Show config soundtrackAudioPath>",   // §4.1
         "soundtrackVolume": 45
       }
     },
@@ -194,30 +203,31 @@ Two workflows on one n8n instance, chained with an Execute Workflow sub-call:
    with its two credentials (already done if you followed
    [`yakyak_engine.md`](./yakyak_engine.md) §5). It does **not** need to be published for
    the sub-workflow call — only for its public webhook.
-2. **Import the front-end** — [`workflow.bbn-daily.json`](../workflow.bbn-daily.json) —
+2. **Create the Anthropic credential** — a generic **Header Auth** credential named
+   exactly `Anthropic API key`, header name `x-api-key`, value your Anthropic key. (The
+   `YakYak API` Bearer credential already exists from the engine setup and is shared.)
+3. **Import the front-end** — [`workflow.bbn-daily.json`](../workflow.bbn-daily.json) —
    open its **Call engine** node and pick the engine from the workflow dropdown, then
    **Publish** it to arm the daily schedule.
-3. **Set the env vars** on the n8n instance (docker `-e` flags; the *front-end's* Code
-   nodes read them, so keep `N8N_BLOCK_ENV_ACCESS_IN_NODE=false` and
-   `N8N_RUNNERS_ENABLED=true`; the engine itself needs none — its auth lives in the
-   credentials):
+4. **Fill the Show config node** — all per-show settings live in this Set node on the
+   canvas; the workflow reads **no environment variables**, so a stock n8n container
+   works as-is:
 
-| Env var | Required | Value |
+| Field | Required | Value |
 | --- | --- | --- |
-| `ANTHROPIC_API_KEY` | ✅ | For the story call (`Write story (Claude)`). |
-| `YAKYAK_TOKEN` | ✅ | For the front-end's own YakYak calls (`Balance guard`, `Set social fields`). |
-| `YAKYAK_API_BASE` | — | Default `https://api.yakyak.ai`; set beta here for test runs. |
-| `BBN_CAMPAIGN_ID` | ✅ | The BBN campaign id — `show.env` `CAMPAIGN_ID` (`a7e7b9c5-0959-41a0-9176-509a3b197775` for the production show). |
-| `BBN_SOUNDTRACK_AUDIO_PATH` | — | The intro track's content address — `show.env` `SOUNDTRACK_AUDIO_PATH`. Omit to skip the soundtrack pin. |
-| `BBN_SOUNDTRACK_VOLUME` | — | `45` (`show.env` `VOLUME`). |
-| `BBN_CHAT_WEBHOOK_URL` | — | Slack/Discord/Teams incoming webhook for the announcement. |
-| `BBN_MIN_TOKEN_BALANCE` | — | Default `2000` (`show.env` `MIN_TOKEN_BALANCE`). |
+| `campaignId` | ✅ | The BBN campaign id — `show.env` `CAMPAIGN_ID` (`a7e7b9c5-0959-41a0-9176-509a3b197775` for the production show). Must be owned by the `YakYak API` credential's account. |
+| `userId` | ✅ | The YakYak user id the credential's PAT belongs to (for the balance check). |
+| `minTokenBalance` | — | Default `2000` (`show.env` `MIN_TOKEN_BALANCE`). |
+| `apiBase` | — | Default `https://api.yakyak.ai`; set beta here for test runs. |
+| `soundtrackAudioPath` | — | The intro track's content address — `show.env` `SOUNDTRACK_AUDIO_PATH`. Leave empty to skip the soundtrack pin. |
+| `soundtrackVolume` | — | `45` (`show.env` `VOLUME`). |
+| `chatWebhookUrl` | — | Slack/Discord/Teams incoming webhook for the announcement. Empty = no announcement (the node fails softly; the run stays green). |
 
-4. **First run by hand:** open the front-end → **Test workflow** — the Schedule trigger
+5. **First run by hand:** open the front-end → **Test workflow** — the Schedule trigger
    fires once immediately. The engine's run shows up nested under the front-end's
-   execution. On **beta** first (`YAKYAK_API_BASE=https://api.beta.yakyak.ai`, beta PAT
-   in both the env var and the `YakYak API` credential, beta campaign id) the whole run
-   is effectively free.
+   execution. On **beta** first (`apiBase` = `https://api.beta.yakyak.ai` in Show config,
+   beta PAT in the `YakYak API` credential, beta campaign id) the whole run is
+   effectively free.
 
 **Runtime shape:** each morning produces two executions — "BBN daily" (spends most of its
 life waiting on the engine sub-workflow) and the nested engine run (slot picking,
@@ -246,15 +256,17 @@ webhook (`/webhook/yakyak-engine` + `x-render-token`) when debugging.
   the run. Mitigation: n8n's *retry on fail* on the engine-call node — a retry lands on
   the same slot (see self-healing above). If stalls prove common, port the re-kick into
   the engine's settled-check as a `resume` call after N unchanged polls.
-- **Token/env:** one prod `yy_live_…` PAT with `video_creation` (+ `social_publishing`
-  if §4.3 goes live) as `YAKYAK_TOKEN`, plus `ANTHROPIC_API_KEY` for the story call. Prove the
-  pipeline on **beta** first (beta accounts carry a large balance): beta base URL, beta
-  campaign, same workflow.
+- **Secrets:** two n8n credentials, zero env vars — one prod `yy_live_…` PAT with
+  `video_creation` (+ `social_publishing` if §4.3 goes live) in the `YakYak API` Bearer
+  credential (shared with the engine), plus the `Anthropic API key` Header Auth
+  credential for the story call. Prove the pipeline on **beta** first (beta accounts
+  carry a large balance): beta `apiBase` in Show config, beta PAT, beta campaign, same
+  workflow.
 
 ## 7. What still favors the showrunner
 
 Honest limits of the n8n replica: `claude -p` gives the story step agentic web access
 (it follows links, retries fetches) where the story call sees only what the three fetch nodes pulled; the
 showrunner's stall re-kick loop is battle-tested; and per-show config lives in versioned
-`show.env` files rather than n8n workflow parameters. None of these block a daily BBN —
+`show.env` files rather than the Show config node on the canvas. None of these block a daily BBN —
 they're the polish gap between "works" and "runs unattended for months."

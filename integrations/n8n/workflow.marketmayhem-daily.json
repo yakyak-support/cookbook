@@ -1,0 +1,545 @@
+{
+  "name": "Market Mayhem — daily episode (front-end for the YakYak engine)",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "executionTimeout": 3600
+  },
+  "nodes": [
+    {
+      "id": "schedule",
+      "name": "Every evening",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        300
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 21 * * *"
+            }
+          ]
+        }
+      },
+      "notes": "21:00 UTC daily — the day's close read (CADENCE=daily in show/MarketMayhem/show.env; crypto trades 24/7, so pick any hour). Use 'Test workflow' to fire a run by hand."
+    },
+    {
+      "id": "showConfig",
+      "name": "Show config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        200,
+        300
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "cfg-campaign",
+              "name": "campaignId",
+              "value": "",
+              "type": "string"
+            },
+            {
+              "id": "cfg-userid",
+              "name": "userId",
+              "value": "",
+              "type": "string"
+            },
+            {
+              "id": "cfg-mintoken",
+              "name": "minTokenBalance",
+              "value": 2000,
+              "type": "number"
+            },
+            {
+              "id": "cfg-apibase",
+              "name": "apiBase",
+              "value": "https://api.yakyak.ai",
+              "type": "string"
+            },
+            {
+              "id": "cfg-soundtra",
+              "name": "soundtrackAudioPath",
+              "value": "",
+              "type": "string"
+            },
+            {
+              "id": "cfg-soundtra",
+              "name": "soundtrackVolume",
+              "value": 45,
+              "type": "number"
+            },
+            {
+              "id": "cfg-chatwebh",
+              "name": "chatWebhookUrl",
+              "value": "",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "notes": "ALL per-show config lives here, on the canvas — the workflow reads no environment variables. Required: campaignId (a campaign the API credential's account owns) and userId (for the balance check). Optional: soundtrackAudioPath (empty = skip the pin), chatWebhookUrl (empty = no announcement)."
+    },
+    {
+      "id": "fetchUser",
+      "name": "Fetch user",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        400,
+        300
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.apiBase }}/users/{{ $json.userId }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "credentials": {
+        "httpBearerAuth": {
+          "name": "YakYak API"
+        }
+      },
+      "notes": "Same 'YakYak API' Bearer credential as the engine — no token on the canvas or in env. onError=continue so Balance guard can report a clear error instead of a bare 404."
+    },
+    {
+      "id": "balanceGuard",
+      "name": "Balance guard",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        600,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Abort BEFORE burning a partial episode — an episode renders every scene (💸).\n// Mirrors MIN_TOKEN_BALANCE=2000 in show/MarketMayhem/show.env.\n// Doubles as the config preflight, so an unfilled Show config fails here in\n// seconds — not after the story step.\nconst cfg = $('Show config').first().json;\nif (!cfg.campaignId) throw new Error('Show config: campaignId is empty — set it to a campaign id the API credential\\'s account owns');\nif (!cfg.userId) throw new Error('Show config: userId is empty — set it to the YakYak user id the API credential belongs to');\nconst user = $json;\nif (user.tokenBalance === undefined) throw new Error('could not fetch the user record — check Show config userId and the \"YakYak API\" credential (' + (user.error?.message || 'no tokenBalance in response') + ')');\nconst balance = Number(user.tokenBalance || 0);\nconst min = Number(cfg.minTokenBalance || 2000);\nif (balance < min) throw new Error('token balance ' + balance + ' is below the ' + min + ' minimum — top up before generating an episode');\nreturn [{ json: { balance } }];"
+      }
+    },
+    {
+      "id": "fetchBtc",
+      "name": "Fetch BTC",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        800,
+        300
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "onError": "continueRegularOutput",
+      "notes": "Free, no-key JSON. onError=continue — Binance geo-blocks some hosts (HTTP 451); the CoinGecko fallback covers that."
+    },
+    {
+      "id": "fetchEth",
+      "name": "Fetch ETH",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1000,
+        300
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "https://api.binance.com/api/v3/ticker/24hr?symbol=ETHUSDT",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "fetchDoge",
+      "name": "Fetch DOGE",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1200,
+        300
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "https://api.binance.com/api/v3/ticker/24hr?symbol=DOGEUSDT",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "fetchFng",
+      "name": "Fetch Fear & Greed",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1400,
+        300
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "https://api.alternative.me/fng/",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "onError": "continueRegularOutput",
+      "notes": "The episode's emotional weather. Optional — a failed fetch is noted in the prompt, not fatal."
+    },
+    {
+      "id": "fetchGecko",
+      "name": "Fetch CoinGecko",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1600,
+        300
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum,dogecoin&vs_currencies=usd&include_24hr_change=true",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "onError": "continueRegularOutput",
+      "notes": "No-key fallback for all three prices + 24h change, used per-coin when the Binance call failed."
+    },
+    {
+      "id": "buildPrompt",
+      "name": "Build prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1800,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const TPL = \"You are the head writer for \\\"Market Mayhem\\\", a daily dark-comedy short-form\\nvideo series that personifies the crypto/markets world. Real price action drives\\nthe plot; the humor comes from the characters' voices and reaction shots. Your\\njob in this run is to produce ONE story.\\n\\nSTEP 1 — Read the data. The fetched market data is included below (Binance 24h\\ntickers for BTC/ETH/DOGE with a CoinGecko fallback, plus the alternative.me\\nFear & Greed index). If a line is marked unavailable, note it and proceed with\\nwhat you have — never invent numbers. Gold and The Fed have no live feed in\\nthis run: dramatize Gold qualitatively against the risk-on/risk-off mood, and\\ntreat The Fed as the macro \\\"interest-rate / disapproving parent\\\" voice. Do NOT\\ngive financial advice.\\n\\nSTEP 2 — Compute the read (in your reasoning):\\n  - The day's biggest GAINER and biggest LOSER among BTC / ETH / DOGE.\\n  - Overall mood: risk-on (green day) vs risk-off (red day).\\n  - The Fear & Greed classification — this is the emotional weather of the episode.\\nThis computed read IS the plot. A green day and a red day must feel different.\\n\\nSTEP 3 — Write the story.\\n\\nCAST (only these may speak; each scene's \\\"leading character\\\" must be one of them):\\n  - Max Mayhem — the manic Market Mayhem anchor. MUST be the leading character in\\n    Scene 1 (cold open, sets the day's mood) and Scene 8 (sign-off). Hyped,\\n    breathless, all-caps energy.\\n  - Bitcoin — the smug veteran who's seen every crash. Dry, been-here-before.\\n  - Ethereum — the earnest, over-explaining younger sibling. Tries too hard.\\n  - Doge — the chaos-gremlin Shiba Inu memecoin. Gleeful, unhinged, no impulse control.\\n  - The Fed — the disapproving parent of the whole market. Stern, deadpan, ominous.\\n  - Gold — the boomer bar of bullion. Slow, smug, \\\"back in my day\\\".\\n\\nTONE: Dark comedy / market satire. Real price moves drive the beats; the comedy\\ncomes from each character's voice and how they react to the day's numbers. No\\nfinancial advice, no real \\\"buy/sell\\\" calls, no slurs. Punch up, not down.\\n\\nPER-SCENE REQUIREMENTS:\\n  - Roughly 200 words of prose describing the scene's visuals, action, and\\n    atmosphere (location, what we see, what the numbers just did, the reaction).\\n    Write it as a director would brief a camera op. Lean on the green/red color\\n    language and candlestick/ticker imagery.\\n  - Exactly ONE spoken dialog line per scene, 8–12 words, attributed to the\\n    scene's leading character. The line should land — a flex, a panic, a deadpan\\n    gut-punch. Do NOT end the dialog line with a period (\\\"!\\\" or \\\"?\\\" are fine).\\n  - Leading character must be from the cast. No other characters speak on the page.\\n  - The day's biggest mover should get the spotlight scene.\\n\\nSTRUCTURE: Exactly 8 scenes.\\n  - Scene 1: Max Mayhem cold-opens with the day's headline mood.\\n  - Scenes 2–7: the five assets react (Bitcoin, Ethereum, Doge, The Fed, Gold),\\n    with the day's biggest mover getting the strongest beat; you may give the\\n    spotlight asset a second scene instead of repeating a quiet one.\\n  - Scene 8: Max Mayhem signs off.\\n\\nSTEP 4 — Reply with ONLY the markdown document below — no preamble, no\\ntriple-backtick fences, nothing after it:\\n\\n  # Market Mayhem — Daily Close\\n  **Generated (UTC):** {{TS}}\\n  **Sources:** Binance 24h ticker (BTC/ETH/DOGE) + alternative.me Fear & Greed\\n\\n  ## Social title: <punchy title for social posting, 50 characters MAX>\\n\\n  ## Headlines we drew from:\\n  - <one bullet per real data point you used, e.g. \\\"BTC +6.2% to $X (Binance 24h)\\\">\\n  - <e.g. \\\"Fear & Greed: Greed (71)\\\">\\n\\n  ## Scene 1 — <short title>\\n  **Leading character:** Max Mayhem\\n  **Dialog:** \\\"<8–12 word line>\\\"\\n\\n  <~200 words of scene prose>\\n\\n  ## Scene 2 — <short title>\\n  **Leading character:** <name from cast>\\n  **Dialog:** \\\"<8–12 word line>\\\"\\n\\n  <~200 words of scene prose>\\n\\n  ... (continue through Scene 8, which is again Max Mayhem) ...\\n\\n===== MARKET DATA =====\\n\\n{{DATA}}\";\n\n// The Market Mayhem head-writer prompt, adapted from show/MarketMayhem/prompt.md.\n// Two changes vs the showrunner original: STEP 1's agentic WebFetch is replaced\n// by the market data the fetch nodes just pulled (an API call can't fetch the\n// web itself), and STEP 4's file-write becomes \"reply with only the markdown\".\n// A '## Social title:' line is requested so ONE model call covers both the\n// story and the ≤50-char social title.\nconst ts = new Date().toISOString();\nconst get = (node) => { try { return $(node).first().json || {}; } catch (e) { return {}; } };\nconst lines = [];\nconst bin = (label, node) => {\n  const t = get(node);\n  if (t.lastPrice === undefined) return false;\n  lines.push(label + ': $' + Number(t.lastPrice) + ', 24h ' + Number(t.priceChangePercent).toFixed(2) + '%, high $' + Number(t.highPrice) + ' / low $' + Number(t.lowPrice) + ' (Binance 24h)');\n  return true;\n};\nconst gecko = get('Fetch CoinGecko');\nconst gk = (label, key) => {\n  const g = gecko[key];\n  if (!g || g.usd === undefined) return false;\n  lines.push(label + ': $' + g.usd + ', 24h ' + Number(g.usd_24h_change || 0).toFixed(2) + '% (CoinGecko fallback)');\n  return true;\n};\nconst okBtc = bin('BTC', 'Fetch BTC') || gk('BTC', 'bitcoin');\nconst okEth = bin('ETH', 'Fetch ETH') || gk('ETH', 'ethereum');\nconst okDoge = bin('DOGE', 'Fetch DOGE') || gk('DOGE', 'dogecoin');\nif (!okBtc && !okEth && !okDoge) throw new Error('no price data from Binance OR CoinGecko — aborting (no material for an episode)');\nif (!okBtc) lines.push('BTC: (source unavailable this run — proceed without it)');\nif (!okEth) lines.push('ETH: (source unavailable this run — proceed without it)');\nif (!okDoge) lines.push('DOGE: (source unavailable this run — proceed without it)');\nconst f = get('Fetch Fear & Greed');\nconst fd = f.data && f.data[0] ? f.data[0] : null;\nlines.push(fd ? 'Fear & Greed: ' + fd.value_classification + ' (' + fd.value + ')' : 'Fear & Greed: (source unavailable this run — proceed without it)');\nconst fill = (t, map) => t.replace(/\\{\\{(\\w+)\\}\\}/g, (m, k) => (map[k] === undefined ? m : map[k]));\nconst prompt = fill(TPL, { TS: ts, DATA: lines.join('\\n') });\nreturn [{ json: { prompt } }];"
+      }
+    },
+    {
+      "id": "writeStory",
+      "name": "Write story (Claude)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2000,
+        300
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { model: 'claude-opus-4-8', max_tokens: 16000, thinking: { type: 'adaptive' }, messages: [ { role: 'user', content: $json.prompt } ] } }}",
+        "options": {
+          "timeout": 600000
+        },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth"
+      },
+      "notes": "Messages API over raw HTTP (no SDK inside n8n). Auth via the 'Anthropic API key' Header Auth credential (header name x-api-key). Adaptive thinking; the story lands in the response's text block.",
+      "credentials": {
+        "httpHeaderAuth": {
+          "name": "Anthropic API key"
+        }
+      }
+    },
+    {
+      "id": "storyPayload",
+      "name": "Build story payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2200,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Extract the story markdown from the Claude response, then port of\n// storyToDescription() from show/showrunner/story-format.js: drop everything\n// before the first '## Scene', collapse each scene's prose to one line, append\n// `<Char> says: \"<dialog>\"`, mapping names through the cast map (CAST_ALIASES\n// in show/MarketMayhem/show.env).\nconst resp = $json;\nif (resp.stop_reason === 'refusal') throw new Error('Claude declined the request (stop_reason: refusal)');\nconst story = (resp.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\\n');\nif (!/## Scene/.test(story)) throw new Error('Claude response contains no \"## Scene\" blocks — not a story');\n\n// ≤50-char social title from the requested '## Social title:' line\nlet socialTitle = '';\nconst mTitle = story.match(/^##\\s*Social title:\\s*(.+)$/mi);\nif (mTitle) socialTitle = [...mTitle[1].trim().replace(/^\"|\"$/g, '')].slice(0, 50).join('');\n\n// caption from the headlines bullets\nconst capLines = [];\nconst hm = story.match(/## Headlines we drew from:\\n([\\s\\S]*?)\\n##/);\nif (hm) for (const l of hm[1].split('\\n')) { const t = l.replace(/^-\\s*/, '').trim(); if (t) capLines.push(t); }\nconst socialCaption = capLines.slice(0, 6).join(' · ').slice(0, 400);\n\nconst ALIASES = {\"Max Mayhem\":\"Max Mayhem\",\"The Fed\":\"The Fed\",\"Bitcoin\":\"Bitcoin\",\"Ethereum\":\"Ethereum\",\"Doge\":\"Doge\",\"Gold\":\"Gold\"};\nconst mapShort = (name) => { for (const k of Object.keys(ALIASES)) if (name.includes(k)) return ALIASES[k]; return String(name).trim(); };\n\nconst lines = story.split(/\\r?\\n/);\nlet inScene = false, n = 0, prose = '', character = '', dialog = '';\nconst parts = [];\nconst emit = () => {\n  if (!inScene) return;\n  const p = prose.replace(/[ \\t]+/g, ' ').trim();\n  const s = mapShort(character);\n  parts.push(n === 0 ? '- ' + p + ' ' + s + ' says: \"' + dialog + '\"' : '\\n\\n  - ' + p + ' ' + s + ' says: \"' + dialog + '\"');\n  n++;\n};\nfor (const line of lines) {\n  if (/^## Scene/.test(line)) { emit(); inScene = true; prose = ''; character = ''; dialog = ''; continue; }\n  if (!inScene) continue;\n  if (/^\\*\\*Leading character:\\*\\*/.test(line)) { character = line.replace(/^\\*\\*Leading character:\\*\\*[ \\t]*/, ''); continue; }\n  if (/^\\*\\*Dialog:\\*\\*/.test(line)) { dialog = line.replace(/^\\*\\*Dialog:\\*\\*[ \\t]*/, '').trim().replace(/^\"|\"$/g, '').replace(/[.。]$/, ''); continue; }\n  if (/^##/.test(line)) { emit(); inScene = false; continue; }\n  prose += ' ' + line;\n}\nemit();\nif (!parts.length) throw new Error('no scenes parsed from the story');\nconst plot = parts.join('');\nreturn [{ json: { plot, socialTitle, socialCaption, scenes: n, story } }];"
+      },
+      "notes": "The story markdown is preserved on this node's output — n8n's execution log is the story archive (the showrunner's stories/ equivalent)."
+    },
+    {
+      "id": "enginePayload",
+      "name": "Build engine payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2400,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Shape the engine call: episode mode in the pinned Market Mayhem campaign, the\n// story as the new episode's plot, optional soundtrack pin. The engine's\n// sub-workflow trigger is passthrough — this item IS the payload (same shape\n// as the engine webhook's body). Re-delivered same-day stories are diff-aware\n// on the engine side, so a duplicate run doesn't re-bill unchanged work.\nconst cfg = $('Show config').first().json;\nif (!cfg.campaignId) throw new Error('Show config: campaignId is empty');\nconst movie = { plot: $json.plot };\nif (cfg.soundtrackAudioPath) {\n  movie.soundtrackAudioPath = cfg.soundtrackAudioPath;\n  if (cfg.soundtrackVolume) movie.soundtrackVolume = Number(cfg.soundtrackVolume);\n}\nreturn [{ json: { target: { mode: 'episode', campaignId: cfg.campaignId }, changes: { movie }, chatWebhookUrl: '' } }];"
+      }
+    },
+    {
+      "id": "callEngine",
+      "name": "Call engine",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        2600,
+        300
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000,
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "",
+          "cachedResultName": "YakYak engine — resolve target, patch or new episode, render, post"
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "notes": "Fires the generic YakYak engine in episode mode. The engine only responds once the episode is generated AND rendered. Retry is safe: a re-run lands on the same unrendered slot. Announcement happens here (below), not in the engine."
+    },
+    {
+      "id": "setSocial",
+      "name": "Set social fields",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2800,
+        300
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Show config').first().json.apiBase }}/workflow/update-movie-social-description",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ Object.assign({ movieId: $json.movieId }, $('Build story payload').first().json.socialTitle ? { socialTitle: $('Build story payload').first().json.socialTitle } : {}, $('Build story payload').first().json.socialCaption ? { socialDescription: $('Build story payload').first().json.socialCaption } : {}) }}",
+        "options": {},
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth"
+      },
+      "notes": "Showrunner parity: ≤50-char social title + caption. onError=continue — cosmetic metadata must not kill a rendered episode.",
+      "credentials": {
+        "httpBearerAuth": {
+          "name": "YakYak API"
+        }
+      }
+    },
+    {
+      "id": "announce",
+      "name": "Announce",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3000,
+        300
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Show config').first().json.chatWebhookUrl }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { text: '📈 Market Mayhem episode ready — \"' + ($('Build story payload').first().json.socialTitle || 'Daily Close') + '\": ' + $('Call engine').first().json.url } }}",
+        "options": {}
+      },
+      "notes": "Review-first output event (the safe default). chatWebhookUrl empty → this node errors and the run still succeeds (onError=continue). Auto-posting to social is the deliberate next step — see the BBN guide §4.3."
+    }
+  ],
+  "connections": {
+    "Every evening": {
+      "main": [
+        [
+          {
+            "node": "Show config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Show config": {
+      "main": [
+        [
+          {
+            "node": "Fetch user",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch user": {
+      "main": [
+        [
+          {
+            "node": "Balance guard",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Balance guard": {
+      "main": [
+        [
+          {
+            "node": "Fetch BTC",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch BTC": {
+      "main": [
+        [
+          {
+            "node": "Fetch ETH",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch ETH": {
+      "main": [
+        [
+          {
+            "node": "Fetch DOGE",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch DOGE": {
+      "main": [
+        [
+          {
+            "node": "Fetch Fear & Greed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Fear & Greed": {
+      "main": [
+        [
+          {
+            "node": "Fetch CoinGecko",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch CoinGecko": {
+      "main": [
+        [
+          {
+            "node": "Build prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build prompt": {
+      "main": [
+        [
+          {
+            "node": "Write story (Claude)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write story (Claude)": {
+      "main": [
+        [
+          {
+            "node": "Build story payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build story payload": {
+      "main": [
+        [
+          {
+            "node": "Build engine payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build engine payload": {
+      "main": [
+        [
+          {
+            "node": "Call engine",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call engine": {
+      "main": [
+        [
+          {
+            "node": "Set social fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set social fields": {
+      "main": [
+        [
+          {
+            "node": "Announce",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}

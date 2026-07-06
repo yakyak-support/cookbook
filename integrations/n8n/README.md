@@ -25,10 +25,25 @@ change + render from any external event.
   ([`.github/workflows/patch-dialogue-to-message.yml`](../../.github/workflows/patch-dialogue-to-message.yml)).
   Full beginner walkthrough (bot setup for all three apps, credentials, import, testing):
   [`docs/workflow_patch_dialogue_to_message.md`](./docs/workflow_patch_dialogue_to_message.md).
-- **[`workflow.bbn-daily.json`](./workflow.bbn-daily.json)** — front-end, episode mode: the
-  **Breaking Bricks News** daily show (fetch real headlines → Claude writes the episode →
-  engine mints + renders the episode → announce). See
-  [`docs/breaking_bricks_news.md`](./docs/breaking_bricks_news.md).
+- **Show front-ends, episode mode** — every demo show from [`../../show/`](../../show/)
+  as an importable scheduled workflow: story sourcing on the canvas, then the engine
+  mints + renders the episode and the front-end announces it. Start with
+  [`docs/breaking_bricks_news.md`](./docs/breaking_bricks_news.md) — it documents the
+  shared architecture once; the other guides cover only what each show does differently.
+
+  | Workflow | Show | Sourcing | Model? | Guide |
+  |---|---|---|:---:|---|
+  | [`workflow.horoscopes-weekly.json`](./workflow.horoscopes-weekly.json) | Cosmic Brief (weekly) | Computed — deterministic from the ISO week | no | [`docs/horoscopes.md`](./docs/horoscopes.md) |
+  | [`workflow.luckyday-daily.json`](./workflow.luckyday-daily.json) | Lucky Day (daily) | Computed — deterministic from the date; Mandarin dialog | no | [`docs/lucky_day.md`](./docs/lucky_day.md) |
+  | [`workflow.suntzu-mwf.json`](./workflow.suntzu-mwf.json) | Sun Tzu, Today (Mon/Wed/Fri) | Extracted — corpus walked by a cursor (static data) | yes | [`docs/sun_tzu_today.md`](./docs/sun_tzu_today.md) |
+  | [`workflow.onthisday-daily.json`](./workflow.onthisday-daily.json) | On This Day (daily) | Computed date → public-domain corpus | yes | [`docs/on_this_day.md`](./docs/on_this_day.md) |
+  | [`workflow.dailypull-daily.json`](./workflow.dailypull-daily.json) | Daily Pull (daily) | Randomized — date-seeded tarot draw, 7-day no-repeat window | yes | [`docs/daily_pull.md`](./docs/daily_pull.md) |
+  | [`workflow.marketmayhem-daily.json`](./workflow.marketmayhem-daily.json) | Market Mayhem (daily) | Live data — Binance 24h + Fear & Greed (CoinGecko fallback) | yes | [`docs/market_mayhem.md`](./docs/market_mayhem.md) |
+  | [`workflow.pettycourt-daily.json`](./workflow.pettycourt-daily.json) | Petty Court (daily) | Live UGC — Reddit drama listings, paraphrased & SFW-screened | yes | [`docs/petty_court.md`](./docs/petty_court.md) |
+  | [`workflow.bbn-daily.json`](./workflow.bbn-daily.json) | Breaking Bricks News (daily) | Live news — BBC / CNN / Al Jazeera headlines | yes | [`docs/breaking_bricks_news.md`](./docs/breaking_bricks_news.md) |
+
+  The two **Computed** shows need no Anthropic credential at all — Cosmic Brief is the
+  recommended first import to prove the engine wiring.
 - **[`regen-from-template.mjs`](./regen-from-template.mjs)** — a zero-dependency Node script
   that runs the engine's flow from a terminal. Use it to prove your token, template, and
   account before wiring nodes.
@@ -57,4 +72,7 @@ Prefer no n8n at all? The standalone render-and-deliver-to-Telegram script lives
 Create the two credentials (`YakYak API` Bearer Auth + `YakYak render webhook token`
 Header Auth — exact names, the workflows find them by name), import the engine, then
 import whichever front-end you want and point its **Execute Workflow** node at the engine.
-Full walkthrough in [`docs/yakyak_engine.md`](./docs/yakyak_engine.md).
+The model-driven show front-ends need one more credential (`Anthropic API key` Header
+Auth — the two Computed shows skip it) and take the rest of their config from a
+**Show config** node on the canvas — no environment variables anywhere. Full
+walkthrough in [`docs/yakyak_engine.md`](./docs/yakyak_engine.md).

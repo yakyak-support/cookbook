@@ -1,0 +1,488 @@
+{
+  "name": "Daily Pull — daily episode (front-end for the YakYak engine)",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "executionTimeout": 3600
+  },
+  "nodes": [
+    {
+      "id": "schedule",
+      "name": "Every morning",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        300
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 6 * * *"
+            }
+          ]
+        }
+      },
+      "notes": "06:00 UTC daily — CADENCE=daily in show/DailyPull/show.env. Use 'Test workflow' to fire a run by hand (note: manual runs don't extend the no-repeat window)."
+    },
+    {
+      "id": "showConfig",
+      "name": "Show config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        200,
+        300
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "cfg-campaign",
+              "name": "campaignId",
+              "value": "",
+              "type": "string"
+            },
+            {
+              "id": "cfg-userid",
+              "name": "userId",
+              "value": "",
+              "type": "string"
+            },
+            {
+              "id": "cfg-mintoken",
+              "name": "minTokenBalance",
+              "value": 2000,
+              "type": "number"
+            },
+            {
+              "id": "cfg-apibase",
+              "name": "apiBase",
+              "value": "https://api.yakyak.ai",
+              "type": "string"
+            },
+            {
+              "id": "cfg-soundtra",
+              "name": "soundtrackAudioPath",
+              "value": "",
+              "type": "string"
+            },
+            {
+              "id": "cfg-soundtra",
+              "name": "soundtrackVolume",
+              "value": 30,
+              "type": "number"
+            },
+            {
+              "id": "cfg-chatwebh",
+              "name": "chatWebhookUrl",
+              "value": "",
+              "type": "string"
+            },
+            {
+              "id": "cfg-corpusur",
+              "name": "corpusUrl",
+              "value": "https://raw.githubusercontent.com/yakyak-support/cookbook/main/show/DailyPull/corpus/major_arcana.md",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "notes": "ALL per-show config lives here, on the canvas — the workflow reads no environment variables. Required: campaignId (a campaign the API credential's account owns) and userId (for the balance check). Optional: soundtrackAudioPath (empty = skip the pin), chatWebhookUrl (empty = no announcement). corpusUrl defaults to the cookbook corpus on GitHub — point it at your fork to edit the corpus."
+    },
+    {
+      "id": "fetchUser",
+      "name": "Fetch user",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        400,
+        300
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.apiBase }}/users/{{ $json.userId }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "credentials": {
+        "httpBearerAuth": {
+          "name": "YakYak API"
+        }
+      },
+      "notes": "Same 'YakYak API' Bearer credential as the engine — no token on the canvas or in env. onError=continue so Balance guard can report a clear error instead of a bare 404."
+    },
+    {
+      "id": "balanceGuard",
+      "name": "Balance guard",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        600,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Abort BEFORE burning a partial episode — an episode renders every scene (💸).\n// Mirrors MIN_TOKEN_BALANCE=2000 in show/DailyPull/show.env.\n// Doubles as the config preflight, so an unfilled Show config fails here in\n// seconds — not after the story step.\nconst cfg = $('Show config').first().json;\nif (!cfg.campaignId) throw new Error('Show config: campaignId is empty — set it to a campaign id the API credential\\'s account owns');\nif (!cfg.userId) throw new Error('Show config: userId is empty — set it to the YakYak user id the API credential belongs to');\nconst user = $json;\nif (user.tokenBalance === undefined) throw new Error('could not fetch the user record — check Show config userId and the \"YakYak API\" credential (' + (user.error?.message || 'no tokenBalance in response') + ')');\nconst balance = Number(user.tokenBalance || 0);\nconst min = Number(cfg.minTokenBalance || 2000);\nif (balance < min) throw new Error('token balance ' + balance + ' is below the ' + min + ' minimum — top up before generating an episode');\nreturn [{ json: { balance } }];"
+      }
+    },
+    {
+      "id": "fetchCorpus",
+      "name": "Fetch corpus",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        800,
+        300
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('Show config').first().json.corpusUrl }}",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "notes": "The 22 Major Arcana corpus, fetched from the cookbook repo. No corpus = no episode, so this node fails hard."
+    },
+    {
+      "id": "drawCards",
+      "name": "Draw cards",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1000,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// The date-seeded 3-card draw — port of show/DailyPull/compute.js (same FNV-1a\n// + mulberry32 stream, so a given date + exclusion window reproduces the\n// showrunner's draw exactly). The 7-draw no-repeat window lives in workflow\n// static data — the n8n analog of re-reading the last 7 committed stories'\n// audit markers; it is extended in 'Record draw' only after the episode\n// rendered. Static data persists only on ACTIVE (scheduled) executions —\n// manual test runs draw correctly but don't extend the window.\nfunction h32(s) { let h = 0x811c9dc5; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193); } return h >>> 0; }\nfunction mulberry32(a) { return function () { a |= 0; a = (a + 0x6d2b79f5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }\nfunction shuffle(arr, rng) { const a = arr.slice(); for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(rng() * (i + 1)); const t = a[i]; a[i] = a[j]; a[j] = t; } return a; }\n\nconst corpus = String($json.data || '');\nconst field = (block, name) => { const m = new RegExp('^\\\\*\\\\*' + name + ':\\\\*\\\\*\\\\s*(.+)$', 'm').exec(block); return m ? m[1].trim() : ''; };\nconst cards = corpus.split(/^## /m).slice(1).map((b) => {\n  const header = b.slice(0, b.indexOf('\\n')).trim(); // \"13 — Death\"\n  const hm = /^(\\d+)\\s*[—-]\\s*(.+)$/.exec(header);\n  if (!hm) return null;\n  // note: compute.js reuses the key 'reversed' for both the corpus meaning and\n  // the drawn orientation (the boolean clobbers the string); kept separate here\n  return { number: parseInt(hm[1], 10), name: hm[2].trim(), keywords: field(b, 'Keywords'), upright: field(b, 'Upright'), reversedMeaning: field(b, 'Reversed'), persona: field(b, 'Persona') };\n}).filter(Boolean);\nif (cards.length < 3) throw new Error('parsed only ' + cards.length + ' cards from the corpus — check Show config corpusUrl');\n\nconst now = new Date();\nconst dateStr = now.toISOString().slice(0, 10); // seed = the UTC date -> daily cadence\nconst rng = mulberry32(h32('daily-pull:' + dateStr));\n\nconst sd = $getWorkflowStaticData('global');\n// same-date re-runs drop the day's own record first, so a retry redraws the\n// SAME cards instead of excluding them\nconst recent = (Array.isArray(sd.dailyPullDraws) ? sd.dailyPullDraws : []).filter((x) => x.date !== dateStr).slice(-7);\nconst excluded = new Set();\nfor (const r of recent) for (const c of (r.cards || [])) excluded.add(c);\nlet pool = cards.filter((c) => !excluded.has(c.number));\nif (pool.length < 3) pool = cards; // relax rather than fail on a small deck\n\nconst POSITIONS = ['Past', 'Present', 'Future'];\nconst drawn = shuffle(pool, rng).slice(0, 3).map((card, i) => Object.assign({}, card, { position: POSITIONS[i], isReversed: rng() < 0.5 }));\nreturn [{ json: { dateStr, cardNumbers: drawn.map((d) => d.number), excluded: Array.from(excluded).sort((a, b) => a - b), drawn } }];"
+      },
+      "notes": "The Randomized (seeded) archetype: same UTC date -> same 3-card draw. The seed, exclusions and draw are all on this node's output — the audit marker."
+    },
+    {
+      "id": "buildPrompt",
+      "name": "Build prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const TPL = \"You are the head writer for \\\"Daily Pull\\\", a short-form daily tarot series. Each\\nepisode is ONE three-card reading — Past, Present, Future — drawn from the 22 Major\\nArcana. The Reader, a warm mystic host, lays the cards and reads them; each drawn\\ncard appears as its own personified figure speaking a single line in its scene.\\n\\nTODAY'S DRAW ({{DATE}}) — use these EXACT cards and orientations, in this order:\\n{{BRIEFS}}\\n\\nCAST — only these four may speak; each scene's leading character must be one of them,\\nnamed EXACTLY as written:\\n  - \\\"The Reader\\\" — the mystic host. Leads Scene 1 (shuffles, names the day's energy and\\n    the spread) and Scene 5 (synthesises the three cards into one piece of guidance — the\\n    screenshot caption beat). Warm, grounded, a little uncanny; never doom-mongering.\\n  - \\\"{{PAST}}\\\" — the PAST card, personified. Leads Scene 2.\\n  - \\\"{{PRESENT}}\\\" — the PRESENT card, personified. Leads Scene 3.\\n  - \\\"{{FUTURE}}\\\" — the FUTURE card, personified. Leads Scene 4.\\n\\nTONE: Intimate, candle-lit, ASMR-calm and a touch mystical. Honest about shadow cards\\n(Death, The Tower, The Devil) as TRANSFORMATION, never as literal doom or fear-mongering.\\nGeneral guidance for an anonymous viewer (\\\"you\\\"), never medical, legal or financial advice.\\n\\nSTRUCTURE — exactly 5 scenes:\\n  1. The Reader — cold open: a candle, the shuffle, naming today's Past/Present/Future spread.\\n  2. {{PAST}} (Past) — the card reveal and what it says about what shaped you.\\n  3. {{PRESENT}} (Present) — the card reveal and what it says about right now.\\n  4. {{FUTURE}} (Future) — the card reveal and where the current is carrying you.\\n  5. The Reader — closes by weaving the three into one clear takeaway (the caption card).\\n\\nPER-SCENE REQUIREMENTS:\\n  - ~180 words of prose briefing the visuals like a director: the card laid on dark velvet,\\n    candle-light, the personified figure (use the \\\"Figure:\\\" description), the art-nouveau\\n    ornament. Per-card accent colour can tint the glow.\\n  - Exactly ONE spoken dialog line per scene, 8–14 words, attributed to the leading character.\\n    Make it land. Do NOT end the dialog line with a period (\\\"!\\\" or \\\"?\\\" are fine).\\n  - Only the four cast above may speak.\\n\\nOUTPUT — reply with ONLY the markdown document below — no preamble, no\\ntriple-backtick fences, nothing after it:\\n\\n  # Daily Pull — {{DATE}}\\n  **Generated (UTC):** {{TS}}\\n  **Spread:** Past · Present · Future (Major Arcana)\\n  **Draw:** {{DRAW}}\\n\\n  ## Social title: <punchy title for social posting, 50 characters MAX>\\n\\n  ## Headlines we drew from:\\n  - 🔮 Daily Pull — {{DATE}}: {{DRAW}}\\n\\n  ## Scene 1 — <short title>\\n  **Leading character:** The Reader\\n  **Dialog:** \\\"<8–14 word line>\\\"\\n\\n  <~180 words of scene prose>\\n\\n  ... (Scene 2 = {{PAST}}, Scene 3 = {{PRESENT}}, Scene 4 = {{FUTURE}}, Scene 5 = The Reader) ...\";\n\n// The Daily Pull head-writer prompt, adapted from show/DailyPull/compute.js.\n// One change vs the showrunner original: the file-write OUTPUT step becomes\n// \"reply with only the markdown\", plus a requested '## Social title:' line so\n// ONE model call covers both the story and the ≤50-char social title.\nconst ts = new Date().toISOString();\nconst p = $json;\nconst fmt = (d) => d.name + (d.isReversed ? ' (reversed)' : '');\nconst cardBrief = (d) =>\n  '  ' + d.position + ' — ' + d.name + (d.isReversed ? ' (REVERSED)' : ' (upright)') + '\\n' +\n  '    Keywords: ' + d.keywords + '\\n' +\n  '    Meaning (' + (d.isReversed ? 'reversed' : 'upright') + '): ' + (d.isReversed ? d.reversedMeaning : d.upright) + '\\n' +\n  '    Figure: ' + d.persona;\nconst fill = (t, map) => t.replace(/\\{\\{(\\w+)\\}\\}/g, (m, k) => (map[k] === undefined ? m : map[k]));\nconst prompt = fill(TPL, {\n  TS: ts,\n  DATE: p.dateStr,\n  BRIEFS: p.drawn.map(cardBrief).join('\\n'),\n  PAST: p.drawn[0].name,\n  PRESENT: p.drawn[1].name,\n  FUTURE: p.drawn[2].name,\n  DRAW: p.drawn.map((d) => d.position + ' — ' + fmt(d)).join(' · '),\n});\nreturn [{ json: { prompt } }];"
+      }
+    },
+    {
+      "id": "writeStory",
+      "name": "Write story (Claude)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1400,
+        300
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { model: 'claude-opus-4-8', max_tokens: 16000, thinking: { type: 'adaptive' }, messages: [ { role: 'user', content: $json.prompt } ] } }}",
+        "options": {
+          "timeout": 600000
+        },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth"
+      },
+      "notes": "Messages API over raw HTTP (no SDK inside n8n). Auth via the 'Anthropic API key' Header Auth credential (header name x-api-key). Adaptive thinking; the story lands in the response's text block.",
+      "credentials": {
+        "httpHeaderAuth": {
+          "name": "Anthropic API key"
+        }
+      }
+    },
+    {
+      "id": "storyPayload",
+      "name": "Build story payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1600,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Extract the story markdown from the Claude response, then port of\n// storyToDescription() from show/showrunner/story-format.js: drop everything\n// before the first '## Scene', collapse each scene's prose to one line, append\n// `<Char> says: \"<dialog>\"`, mapping names through the cast map (CAST_ALIASES\n// in show/DailyPull/show.env).\nconst resp = $json;\nif (resp.stop_reason === 'refusal') throw new Error('Claude declined the request (stop_reason: refusal)');\nconst story = (resp.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\\n');\nif (!/## Scene/.test(story)) throw new Error('Claude response contains no \"## Scene\" blocks — not a story');\n\n// ≤50-char social title from the requested '## Social title:' line\nlet socialTitle = '';\nconst mTitle = story.match(/^##\\s*Social title:\\s*(.+)$/mi);\nif (mTitle) socialTitle = [...mTitle[1].trim().replace(/^\"|\"$/g, '')].slice(0, 50).join('');\n\n// caption from the headlines bullets\nconst capLines = [];\nconst hm = story.match(/## Headlines we drew from:\\n([\\s\\S]*?)\\n##/);\nif (hm) for (const l of hm[1].split('\\n')) { const t = l.replace(/^-\\s*/, '').trim(); if (t) capLines.push(t); }\nconst socialCaption = capLines.slice(0, 6).join(' · ').slice(0, 400);\n\nconst ALIASES = {\"The Reader\":\"The Reader\",\"The High Priestess\":\"The High Priestess\",\"The Hierophant\":\"The Hierophant\",\"The Hanged Man\":\"The Hanged Man\",\"The Hermit\":\"The Hermit\",\"The Magician\":\"The Magician\",\"The Emperor\":\"The Emperor\",\"The Empress\":\"The Empress\",\"The Lovers\":\"The Lovers\",\"The Chariot\":\"The Chariot\",\"The Fool\":\"The Fool\",\"The Devil\":\"The Devil\",\"The Tower\":\"The Tower\",\"The Star\":\"The Star\",\"The Moon\":\"The Moon\",\"The Sun\":\"The Sun\",\"The World\":\"The World\",\"Wheel of Fortune\":\"Wheel of Fortune\",\"Strength\":\"Strength\",\"Justice\":\"Justice\",\"Death\":\"Death\",\"Temperance\":\"Temperance\",\"Judgement\":\"Judgement\"};\nconst mapShort = (name) => { for (const k of Object.keys(ALIASES)) if (name.includes(k)) return ALIASES[k]; return String(name).trim(); };\n\nconst lines = story.split(/\\r?\\n/);\nlet inScene = false, n = 0, prose = '', character = '', dialog = '';\nconst parts = [];\nconst emit = () => {\n  if (!inScene) return;\n  const p = prose.replace(/[ \\t]+/g, ' ').trim();\n  const s = mapShort(character);\n  parts.push(n === 0 ? '- ' + p + ' ' + s + ' says: \"' + dialog + '\"' : '\\n\\n  - ' + p + ' ' + s + ' says: \"' + dialog + '\"');\n  n++;\n};\nfor (const line of lines) {\n  if (/^## Scene/.test(line)) { emit(); inScene = true; prose = ''; character = ''; dialog = ''; continue; }\n  if (!inScene) continue;\n  if (/^\\*\\*Leading character:\\*\\*/.test(line)) { character = line.replace(/^\\*\\*Leading character:\\*\\*[ \\t]*/, ''); continue; }\n  if (/^\\*\\*Dialog:\\*\\*/.test(line)) { dialog = line.replace(/^\\*\\*Dialog:\\*\\*[ \\t]*/, '').trim().replace(/^\"|\"$/g, '').replace(/[.。]$/, ''); continue; }\n  if (/^##/.test(line)) { emit(); inScene = false; continue; }\n  prose += ' ' + line;\n}\nemit();\nif (!parts.length) throw new Error('no scenes parsed from the story');\nconst plot = parts.join('');\nreturn [{ json: { plot, socialTitle, socialCaption, scenes: n, story } }];"
+      },
+      "notes": "The story markdown is preserved on this node's output — n8n's execution log is the story archive (the showrunner's stories/ equivalent)."
+    },
+    {
+      "id": "enginePayload",
+      "name": "Build engine payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1800,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Shape the engine call: episode mode in the pinned Daily Pull campaign, the\n// story as the new episode's plot, optional soundtrack pin. The engine's\n// sub-workflow trigger is passthrough — this item IS the payload (same shape\n// as the engine webhook's body). Re-delivered same-day stories are diff-aware\n// on the engine side, so a duplicate run doesn't re-bill unchanged work.\nconst cfg = $('Show config').first().json;\nif (!cfg.campaignId) throw new Error('Show config: campaignId is empty');\nconst movie = { plot: $json.plot };\nif (cfg.soundtrackAudioPath) {\n  movie.soundtrackAudioPath = cfg.soundtrackAudioPath;\n  if (cfg.soundtrackVolume) movie.soundtrackVolume = Number(cfg.soundtrackVolume);\n}\nreturn [{ json: { target: { mode: 'episode', campaignId: cfg.campaignId }, changes: { movie }, chatWebhookUrl: '' } }];"
+      }
+    },
+    {
+      "id": "callEngine",
+      "name": "Call engine",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        2000,
+        300
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000,
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "",
+          "cachedResultName": "YakYak engine — resolve target, patch or new episode, render, post"
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "notes": "Fires the generic YakYak engine in episode mode. The engine only responds once the episode is generated AND rendered. Retry is safe: a re-run lands on the same unrendered slot. Announcement happens here (below), not in the engine."
+    },
+    {
+      "id": "recordDraw",
+      "name": "Record draw",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2200,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Extend the no-repeat window only AFTER the engine returned a rendered\n// episode (a failed run re-draws the same cards next time — parity with the\n// showrunner, whose window reads committed story files). Same-date re-runs\n// replace the day's entry instead of double-counting it. Only active\n// executions persist static data.\nconst sd = $getWorkflowStaticData('global');\nconst d = $('Draw cards').first().json;\nconst arr = (Array.isArray(sd.dailyPullDraws) ? sd.dailyPullDraws : []).filter((x) => x.date !== d.dateStr);\narr.push({ date: d.dateStr, cards: d.cardNumbers });\nsd.dailyPullDraws = arr.slice(-7);\nreturn $input.all();"
+      }
+    },
+    {
+      "id": "setSocial",
+      "name": "Set social fields",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2400,
+        300
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Show config').first().json.apiBase }}/workflow/update-movie-social-description",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ Object.assign({ movieId: $json.movieId }, $('Build story payload').first().json.socialTitle ? { socialTitle: $('Build story payload').first().json.socialTitle } : {}, $('Build story payload').first().json.socialCaption ? { socialDescription: $('Build story payload').first().json.socialCaption } : {}) }}",
+        "options": {},
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth"
+      },
+      "notes": "Showrunner parity: ≤50-char social title + caption. onError=continue — cosmetic metadata must not kill a rendered episode.",
+      "credentials": {
+        "httpBearerAuth": {
+          "name": "YakYak API"
+        }
+      }
+    },
+    {
+      "id": "announce",
+      "name": "Announce",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2600,
+        300
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Show config').first().json.chatWebhookUrl }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { text: '🔮 Daily Pull episode ready — \"' + ($('Build story payload').first().json.socialTitle || 'Daily reading') + '\": ' + $('Call engine').first().json.url } }}",
+        "options": {}
+      },
+      "notes": "Review-first output event (the safe default). chatWebhookUrl empty → this node errors and the run still succeeds (onError=continue). Auto-posting to social is the deliberate next step — see the BBN guide §4.3."
+    }
+  ],
+  "connections": {
+    "Every morning": {
+      "main": [
+        [
+          {
+            "node": "Show config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Show config": {
+      "main": [
+        [
+          {
+            "node": "Fetch user",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch user": {
+      "main": [
+        [
+          {
+            "node": "Balance guard",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Balance guard": {
+      "main": [
+        [
+          {
+            "node": "Fetch corpus",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch corpus": {
+      "main": [
+        [
+          {
+            "node": "Draw cards",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Draw cards": {
+      "main": [
+        [
+          {
+            "node": "Build prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build prompt": {
+      "main": [
+        [
+          {
+            "node": "Write story (Claude)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write story (Claude)": {
+      "main": [
+        [
+          {
+            "node": "Build story payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build story payload": {
+      "main": [
+        [
+          {
+            "node": "Build engine payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build engine payload": {
+      "main": [
+        [
+          {
+            "node": "Call engine",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call engine": {
+      "main": [
+        [
+          {
+            "node": "Record draw",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Record draw": {
+      "main": [
+        [
+          {
+            "node": "Set social fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set social fields": {
+      "main": [
+        [
+          {
+            "node": "Announce",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}

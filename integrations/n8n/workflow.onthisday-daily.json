@@ -1,0 +1,462 @@
+{
+  "name": "On This Day — daily episode (front-end for the YakYak engine)",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "executionTimeout": 3600
+  },
+  "nodes": [
+    {
+      "id": "schedule",
+      "name": "Every morning",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        300
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 6 * * *"
+            }
+          ]
+        }
+      },
+      "notes": "06:00 UTC daily — CADENCE=daily in show/OnThisDay/show.env. Use 'Test workflow' to fire a run by hand."
+    },
+    {
+      "id": "showConfig",
+      "name": "Show config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        200,
+        300
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "cfg-campaign",
+              "name": "campaignId",
+              "value": "",
+              "type": "string"
+            },
+            {
+              "id": "cfg-userid",
+              "name": "userId",
+              "value": "",
+              "type": "string"
+            },
+            {
+              "id": "cfg-mintoken",
+              "name": "minTokenBalance",
+              "value": 2000,
+              "type": "number"
+            },
+            {
+              "id": "cfg-apibase",
+              "name": "apiBase",
+              "value": "https://api.yakyak.ai",
+              "type": "string"
+            },
+            {
+              "id": "cfg-soundtra",
+              "name": "soundtrackAudioPath",
+              "value": "",
+              "type": "string"
+            },
+            {
+              "id": "cfg-soundtra",
+              "name": "soundtrackVolume",
+              "value": 35,
+              "type": "number"
+            },
+            {
+              "id": "cfg-chatwebh",
+              "name": "chatWebhookUrl",
+              "value": "",
+              "type": "string"
+            },
+            {
+              "id": "cfg-corpusur",
+              "name": "corpusUrl",
+              "value": "https://raw.githubusercontent.com/yakyak-support/cookbook/main/show/OnThisDay/corpus/on_this_day.md",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "notes": "ALL per-show config lives here, on the canvas — the workflow reads no environment variables. Required: campaignId (a campaign the API credential's account owns) and userId (for the balance check). Optional: soundtrackAudioPath (empty = skip the pin), chatWebhookUrl (empty = no announcement). corpusUrl defaults to the cookbook corpus on GitHub — point it at your fork to edit the corpus."
+    },
+    {
+      "id": "fetchUser",
+      "name": "Fetch user",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        400,
+        300
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.apiBase }}/users/{{ $json.userId }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "credentials": {
+        "httpBearerAuth": {
+          "name": "YakYak API"
+        }
+      },
+      "notes": "Same 'YakYak API' Bearer credential as the engine — no token on the canvas or in env. onError=continue so Balance guard can report a clear error instead of a bare 404."
+    },
+    {
+      "id": "balanceGuard",
+      "name": "Balance guard",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        600,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Abort BEFORE burning a partial episode — an episode renders every scene (💸).\n// Mirrors MIN_TOKEN_BALANCE=2000 in show/OnThisDay/show.env.\n// Doubles as the config preflight, so an unfilled Show config fails here in\n// seconds — not after the story step.\nconst cfg = $('Show config').first().json;\nif (!cfg.campaignId) throw new Error('Show config: campaignId is empty — set it to a campaign id the API credential\\'s account owns');\nif (!cfg.userId) throw new Error('Show config: userId is empty — set it to the YakYak user id the API credential belongs to');\nconst user = $json;\nif (user.tokenBalance === undefined) throw new Error('could not fetch the user record — check Show config userId and the \"YakYak API\" credential (' + (user.error?.message || 'no tokenBalance in response') + ')');\nconst balance = Number(user.tokenBalance || 0);\nconst min = Number(cfg.minTokenBalance || 2000);\nif (balance < min) throw new Error('token balance ' + balance + ' is below the ' + min + ' minimum — top up before generating an episode');\nreturn [{ json: { balance } }];"
+      }
+    },
+    {
+      "id": "fetchCorpus",
+      "name": "Fetch corpus",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        800,
+        300
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('Show config').first().json.corpusUrl }}",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "notes": "The baked public-domain anniversary corpus, fetched from the cookbook repo. No corpus = no episode, so this node fails hard."
+    },
+    {
+      "id": "pickAnniversary",
+      "name": "Pick anniversary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1000,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Deterministic date -> anniversary selection — port of show/OnThisDay/compute.js.\n// One difference: same-date entries rotate by YEAR here (stateless), where the\n// showrunner rotates by story-file count — successive years still get different\n// entries for the same calendar date. If today's MM-DD has no entry, walk\n// forward day by day (wrapping at year end) to the next date that does.\nconst corpus = String($json.data || '');\nconst entries = corpus\n  .split(/^## /m)\n  .slice(1)\n  .map((b) => {\n    const nl = b.indexOf('\\n');\n    const header = b.slice(0, nl).trim(); // \"06-09 — 0068 — The Emperor Nero dies, ...\"\n    const body = b.slice(nl + 1).trim().split(/\\n\\s*\\n/)[0].trim();\n    const hm = /^(\\d{2}-\\d{2})\\s*[—-]\\s*(\\S+)\\s*[—-]\\s*(.+)$/.exec(header);\n    if (!hm) return null;\n    return { date: hm[1], year: hm[2], title: hm[3].trim(), account: body };\n  })\n  .filter(Boolean);\nif (!entries.length) throw new Error('no entries parsed from the corpus — check Show config corpusUrl');\nconst now = new Date();\nconst pad = (x) => String(x).padStart(2, '0');\nconst mmdd = pad(now.getUTCMonth() + 1) + '-' + pad(now.getUTCDate());\nconst entriesFor = (d) => entries.filter((e) => e.date === d);\nconst advance = (d) => {\n  // step one day forward, wrapping Dec 31 -> Jan 01; fixed leap year (2000) so\n  // 02-29 is reachable and the cycle length is 366\n  const [mm, dd] = d.split('-').map(Number);\n  const x = new Date(Date.UTC(2000, mm - 1, dd));\n  x.setUTCDate(x.getUTCDate() + 1);\n  return pad(x.getUTCMonth() + 1) + '-' + pad(x.getUTCDate());\n};\nlet date = mmdd, matches = entriesFor(date), walked = 0;\nwhile (!matches.length && walked < 366) { date = advance(date); matches = entriesFor(date); walked += 1; }\nif (!matches.length) throw new Error('corpus has no usable entries for any date');\nconst pick = matches[now.getUTCFullYear() % matches.length];\nreturn [{ json: { mmdd, walked, date, year: pick.year, title: pick.title, account: pick.account } }];"
+      }
+    },
+    {
+      "id": "buildPrompt",
+      "name": "Build prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const TPL = \"You are the head writer for \\\"On This Day\\\", a short-form video series that takes\\nONE real historical anniversary and stages it as a self-contained dramatized\\nreenactment. Educational and cinematic: a true event from the public-domain\\nhistorical record, brought to life and framed for a modern audience.\\n\\nTODAY'S ANNIVERSARY (date {{DATE}}, year {{YEAR}}):\\n  {{TITLE}}\\n\\nTHE FACTUAL ACCOUNT (your source of truth — do not contradict it, do not invent\\nfictional outcomes; you may dramatize dialogue and atmosphere around these facts):\\n  {{ACCOUNT}}\\n\\nCAST:\\n  - The Chronicler — the recurring host of the series, a calm, erudite time-traveling\\n    narrator who steps through eras unseen. MUST be the leading character in Scene 1\\n    (a cold open that places us at the date and stakes) and the final scene (a close\\n    that delivers the \\\"On this day…\\\" takeaway as a screenshot caption card). Grave,\\n    warm, documentary gravitas — think a master narrator.\\n  - The historical figures of THIS event (e.g. the people named or implied in the\\n    account). Introduce them by name as the leading character of the middle scenes.\\n    These change every episode; that is the format. Keep them historically plausible.\\n\\nTONE: Cinematic historical documentary-drama. Sepia/archival turning to vivid color;\\nperiod-accurate detail; real stakes. Educational but dramatic. No glorifying of\\nviolence or atrocity — render tragedy with gravity, not spectacle. No slurs.\\n\\nSTRUCTURE — exactly 7 scenes:\\n  1. The Chronicler sets the date and the world on the eve of the event (cold open).\\n  2–5. The event itself, dramatized through its historical figures: the build-up,\\n       the turning point, the climax, the immediate aftermath. Give the central\\n       figure of the event the spotlight scene.\\n  6. The consequence — why this day still matters.\\n  7. The Chronicler closes, delivering \\\"On this day in {{YEAR}}…\\\" as the takeaway —\\n     this is the screenshot caption card.\\n\\nPER-SCENE REQUIREMENTS:\\n  - ~200 words of prose describing visuals, action and atmosphere (brief it like a\\n    director: location, light, period detail, what just happened, what's happening\\n    now). Lean on the archival-to-color look: aged sepia photography, dust and grain\\n    resolving into rich cinematic color on the dramatic beats.\\n  - Exactly ONE spoken dialog line per scene, 8–14 words, attributed to the leading\\n    character. Make it land. Do NOT end the dialog line with a period (\\\"!\\\" or \\\"?\\\" are fine).\\n  - The leading character of scenes 2–5 must be a historical figure of this event;\\n    scenes 1 and 7 are The Chronicler.\\n\\nOUTPUT — reply with ONLY the markdown document below — no preamble, no\\ntriple-backtick fences, nothing after it:\\n\\n  # On This Day — {{TITLE}}\\n  **Generated (UTC):** {{TS}}\\n  **Anniversary:** {{DATE}} {{YEAR}} — {{TITLE}}\\n\\n  ## Social title: <punchy title for social posting, 50 characters MAX>\\n\\n  ## Headlines we drew from:\\n  - On this day in {{YEAR}}: {{TITLE}}\\n\\n  ## Scene 1 — <short title>\\n  **Leading character:** The Chronicler\\n  **Dialog:** \\\"<8–14 word line>\\\"\\n\\n  <~200 words of scene prose>\\n\\n  ... (continue through Scene 7, which is again The Chronicler) ...\";\n\n// The On This Day head-writer prompt, adapted from show/OnThisDay/compute.js.\n// One change vs the showrunner original: the file-write OUTPUT step becomes\n// \"reply with only the markdown\", plus a requested '## Social title:' line so\n// ONE model call covers both the story and the ≤50-char social title.\nconst ts = new Date().toISOString();\nconst p = $json;\nconst fill = (t, map) => t.replace(/\\{\\{(\\w+)\\}\\}/g, (m, k) => (map[k] === undefined ? m : map[k]));\nconst prompt = fill(TPL, { TS: ts, DATE: p.date, YEAR: p.year, TITLE: p.title, ACCOUNT: p.account });\nreturn [{ json: { prompt } }];"
+      }
+    },
+    {
+      "id": "writeStory",
+      "name": "Write story (Claude)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1400,
+        300
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { model: 'claude-opus-4-8', max_tokens: 16000, thinking: { type: 'adaptive' }, messages: [ { role: 'user', content: $json.prompt } ] } }}",
+        "options": {
+          "timeout": 600000
+        },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth"
+      },
+      "notes": "Messages API over raw HTTP (no SDK inside n8n). Auth via the 'Anthropic API key' Header Auth credential (header name x-api-key). Adaptive thinking; the story lands in the response's text block.",
+      "credentials": {
+        "httpHeaderAuth": {
+          "name": "Anthropic API key"
+        }
+      }
+    },
+    {
+      "id": "storyPayload",
+      "name": "Build story payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1600,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Extract the story markdown from the Claude response, then port of\n// storyToDescription() from show/showrunner/story-format.js: drop everything\n// before the first '## Scene', collapse each scene's prose to one line, append\n// `<Char> says: \"<dialog>\"`, mapping names through the cast map (CAST_ALIASES\n// in show/OnThisDay/show.env).\nconst resp = $json;\nif (resp.stop_reason === 'refusal') throw new Error('Claude declined the request (stop_reason: refusal)');\nconst story = (resp.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\\n');\nif (!/## Scene/.test(story)) throw new Error('Claude response contains no \"## Scene\" blocks — not a story');\n\n// ≤50-char social title from the requested '## Social title:' line\nlet socialTitle = '';\nconst mTitle = story.match(/^##\\s*Social title:\\s*(.+)$/mi);\nif (mTitle) socialTitle = [...mTitle[1].trim().replace(/^\"|\"$/g, '')].slice(0, 50).join('');\n\n// caption from the headlines bullets\nconst capLines = [];\nconst hm = story.match(/## Headlines we drew from:\\n([\\s\\S]*?)\\n##/);\nif (hm) for (const l of hm[1].split('\\n')) { const t = l.replace(/^-\\s*/, '').trim(); if (t) capLines.push(t); }\nconst socialCaption = capLines.slice(0, 6).join(' · ').slice(0, 400);\n\nconst ALIASES = {\"The Chronicler\":\"The Chronicler\"};\nconst mapShort = (name) => { for (const k of Object.keys(ALIASES)) if (name.includes(k)) return ALIASES[k]; return String(name).trim(); };\n\nconst lines = story.split(/\\r?\\n/);\nlet inScene = false, n = 0, prose = '', character = '', dialog = '';\nconst parts = [];\nconst emit = () => {\n  if (!inScene) return;\n  const p = prose.replace(/[ \\t]+/g, ' ').trim();\n  const s = mapShort(character);\n  parts.push(n === 0 ? '- ' + p + ' ' + s + ' says: \"' + dialog + '\"' : '\\n\\n  - ' + p + ' ' + s + ' says: \"' + dialog + '\"');\n  n++;\n};\nfor (const line of lines) {\n  if (/^## Scene/.test(line)) { emit(); inScene = true; prose = ''; character = ''; dialog = ''; continue; }\n  if (!inScene) continue;\n  if (/^\\*\\*Leading character:\\*\\*/.test(line)) { character = line.replace(/^\\*\\*Leading character:\\*\\*[ \\t]*/, ''); continue; }\n  if (/^\\*\\*Dialog:\\*\\*/.test(line)) { dialog = line.replace(/^\\*\\*Dialog:\\*\\*[ \\t]*/, '').trim().replace(/^\"|\"$/g, '').replace(/[.。]$/, ''); continue; }\n  if (/^##/.test(line)) { emit(); inScene = false; continue; }\n  prose += ' ' + line;\n}\nemit();\nif (!parts.length) throw new Error('no scenes parsed from the story');\nconst plot = parts.join('');\nreturn [{ json: { plot, socialTitle, socialCaption, scenes: n, story } }];"
+      },
+      "notes": "Only The Chronicler is aliased — the day's historical figures are episodic (allowNewCharacters=true on this campaign) and keep the names the story gives them."
+    },
+    {
+      "id": "enginePayload",
+      "name": "Build engine payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1800,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Shape the engine call: episode mode in the pinned On This Day campaign, the\n// story as the new episode's plot, optional soundtrack pin. The engine's\n// sub-workflow trigger is passthrough — this item IS the payload (same shape\n// as the engine webhook's body). Re-delivered same-day stories are diff-aware\n// on the engine side, so a duplicate run doesn't re-bill unchanged work.\nconst cfg = $('Show config').first().json;\nif (!cfg.campaignId) throw new Error('Show config: campaignId is empty');\nconst movie = { plot: $json.plot };\nif (cfg.soundtrackAudioPath) {\n  movie.soundtrackAudioPath = cfg.soundtrackAudioPath;\n  if (cfg.soundtrackVolume) movie.soundtrackVolume = Number(cfg.soundtrackVolume);\n}\nreturn [{ json: { target: { mode: 'episode', campaignId: cfg.campaignId }, changes: { movie }, chatWebhookUrl: '' } }];"
+      }
+    },
+    {
+      "id": "callEngine",
+      "name": "Call engine",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        2000,
+        300
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000,
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "",
+          "cachedResultName": "YakYak engine — resolve target, patch or new episode, render, post"
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "notes": "Fires the generic YakYak engine in episode mode. The engine only responds once the episode is generated AND rendered. Retry is safe: a re-run lands on the same unrendered slot. Announcement happens here (below), not in the engine. NOTE: OnThisDay is the cookbook's worked example of the content-moderation failure path — scenes naming protected people/brands can be rejected by every image/video provider and fail the render. See docs/debugging.md in the repo."
+    },
+    {
+      "id": "setSocial",
+      "name": "Set social fields",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2200,
+        300
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Show config').first().json.apiBase }}/workflow/update-movie-social-description",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ Object.assign({ movieId: $json.movieId }, $('Build story payload').first().json.socialTitle ? { socialTitle: $('Build story payload').first().json.socialTitle } : {}, $('Build story payload').first().json.socialCaption ? { socialDescription: $('Build story payload').first().json.socialCaption } : {}) }}",
+        "options": {},
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth"
+      },
+      "notes": "Showrunner parity: ≤50-char social title + caption. onError=continue — cosmetic metadata must not kill a rendered episode.",
+      "credentials": {
+        "httpBearerAuth": {
+          "name": "YakYak API"
+        }
+      }
+    },
+    {
+      "id": "announce",
+      "name": "Announce",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2400,
+        300
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Show config').first().json.chatWebhookUrl }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { text: '📜 On This Day episode ready — \"' + ($('Build story payload').first().json.socialTitle || 'Latest anniversary') + '\": ' + $('Call engine').first().json.url } }}",
+        "options": {}
+      },
+      "notes": "Review-first output event (the safe default). chatWebhookUrl empty → this node errors and the run still succeeds (onError=continue). Auto-posting to social is the deliberate next step — see the BBN guide §4.3."
+    }
+  ],
+  "connections": {
+    "Every morning": {
+      "main": [
+        [
+          {
+            "node": "Show config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Show config": {
+      "main": [
+        [
+          {
+            "node": "Fetch user",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch user": {
+      "main": [
+        [
+          {
+            "node": "Balance guard",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Balance guard": {
+      "main": [
+        [
+          {
+            "node": "Fetch corpus",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch corpus": {
+      "main": [
+        [
+          {
+            "node": "Pick anniversary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pick anniversary": {
+      "main": [
+        [
+          {
+            "node": "Build prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build prompt": {
+      "main": [
+        [
+          {
+            "node": "Write story (Claude)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write story (Claude)": {
+      "main": [
+        [
+          {
+            "node": "Build story payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build story payload": {
+      "main": [
+        [
+          {
+            "node": "Build engine payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build engine payload": {
+      "main": [
+        [
+          {
+            "node": "Call engine",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call engine": {
+      "main": [
+        [
+          {
+            "node": "Set social fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set social fields": {
+      "main": [
+        [
+          {
+            "node": "Announce",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}

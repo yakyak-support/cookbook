@@ -1,0 +1,488 @@
+{
+  "name": "Sun Tzu, Today — Mon/Wed/Fri episode (front-end for the YakYak engine)",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "executionTimeout": 3600
+  },
+  "nodes": [
+    {
+      "id": "schedule",
+      "name": "Mon Wed Fri",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        300
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 6 * * 1,3,5"
+            }
+          ]
+        }
+      },
+      "notes": "06:00 UTC Mon/Wed/Fri — CADENCE=mwf in show/SunTzuToday/show.env. Use 'Test workflow' to fire a run by hand (note: manual runs don't advance the maxim cursor)."
+    },
+    {
+      "id": "showConfig",
+      "name": "Show config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        200,
+        300
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "cfg-campaign",
+              "name": "campaignId",
+              "value": "",
+              "type": "string"
+            },
+            {
+              "id": "cfg-userid",
+              "name": "userId",
+              "value": "",
+              "type": "string"
+            },
+            {
+              "id": "cfg-mintoken",
+              "name": "minTokenBalance",
+              "value": 2000,
+              "type": "number"
+            },
+            {
+              "id": "cfg-apibase",
+              "name": "apiBase",
+              "value": "https://api.yakyak.ai",
+              "type": "string"
+            },
+            {
+              "id": "cfg-soundtra",
+              "name": "soundtrackAudioPath",
+              "value": "",
+              "type": "string"
+            },
+            {
+              "id": "cfg-soundtra",
+              "name": "soundtrackVolume",
+              "value": 35,
+              "type": "number"
+            },
+            {
+              "id": "cfg-chatwebh",
+              "name": "chatWebhookUrl",
+              "value": "",
+              "type": "string"
+            },
+            {
+              "id": "cfg-corpusur",
+              "name": "corpusUrl",
+              "value": "https://raw.githubusercontent.com/yakyak-support/cookbook/main/show/SunTzuToday/corpus/art_of_war.md",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "notes": "ALL per-show config lives here, on the canvas — the workflow reads no environment variables. Required: campaignId (a campaign the API credential's account owns) and userId (for the balance check). Optional: soundtrackAudioPath (empty = skip the pin), chatWebhookUrl (empty = no announcement). corpusUrl defaults to the cookbook corpus on GitHub — point it at your fork to edit the corpus."
+    },
+    {
+      "id": "fetchUser",
+      "name": "Fetch user",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        400,
+        300
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.apiBase }}/users/{{ $json.userId }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "credentials": {
+        "httpBearerAuth": {
+          "name": "YakYak API"
+        }
+      },
+      "notes": "Same 'YakYak API' Bearer credential as the engine — no token on the canvas or in env. onError=continue so Balance guard can report a clear error instead of a bare 404."
+    },
+    {
+      "id": "balanceGuard",
+      "name": "Balance guard",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        600,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Abort BEFORE burning a partial episode — an episode renders every scene (💸).\n// Mirrors MIN_TOKEN_BALANCE=2000 in show/SunTzuToday/show.env.\n// Doubles as the config preflight, so an unfilled Show config fails here in\n// seconds — not after the story step.\nconst cfg = $('Show config').first().json;\nif (!cfg.campaignId) throw new Error('Show config: campaignId is empty — set it to a campaign id the API credential\\'s account owns');\nif (!cfg.userId) throw new Error('Show config: userId is empty — set it to the YakYak user id the API credential belongs to');\nconst user = $json;\nif (user.tokenBalance === undefined) throw new Error('could not fetch the user record — check Show config userId and the \"YakYak API\" credential (' + (user.error?.message || 'no tokenBalance in response') + ')');\nconst balance = Number(user.tokenBalance || 0);\nconst min = Number(cfg.minTokenBalance || 2000);\nif (balance < min) throw new Error('token balance ' + balance + ' is below the ' + min + ' minimum — top up before generating an episode');\nreturn [{ json: { balance } }];"
+      }
+    },
+    {
+      "id": "fetchCorpus",
+      "name": "Fetch corpus",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        800,
+        300
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('Show config').first().json.corpusUrl }}",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "notes": "The public-domain corpus (Art of War, Lionel Giles 1910, Project Gutenberg #132) fetched from the cookbook repo — the showrunner reads the same file from its checkout. No corpus = no episode, so this node fails hard."
+    },
+    {
+      "id": "pickMaxim",
+      "name": "Pick maxim",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1000,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Cursor = n8n workflow static data — the analog of the showrunner's cursor,\n// which is the count of committed story files. NOTE: static data persists only\n// on ACTIVE (scheduled) executions — a manual 'Test workflow' run reads it but\n// cannot save it, so manual tests re-run the same maxim. The cursor advances in\n// the 'Advance cursor' node only after the episode actually rendered.\nconst sd = $getWorkflowStaticData('global');\nconst cursor = Number(sd.sunTzuCursor || 0);\nconst corpus = String($json.data || '');\nconst maxims = corpus\n  .split(/^## Maxim /m)\n  .slice(1)\n  .map((b) => {\n    const nl = b.indexOf('\\n');\n    const header = b.slice(0, nl).trim(); // \"18 — Chapter I: LAYING PLANS, v18\"\n    const body = b.slice(nl + 1).trim().split(/\\n\\s*\\n/)[0].trim();\n    return { header, body };\n  });\nif (!maxims.length) throw new Error('no maxims parsed from the corpus — check Show config corpusUrl');\nconst idx = cursor % maxims.length; // corpus exhausted -> loop, like compute.js\nconst pick = maxims[idx];\nconst verseRef = pick.header.replace(/^\\d+\\s*[—-]\\s*/, ''); // \"Chapter I: LAYING PLANS, v18\"\nreturn [{ json: { maxim: pick.body, verseRef, cursor, idx, total: maxims.length } }];"
+      },
+      "notes": "The Extracted archetype's cursor: one maxim per episode, walked sequentially, looping when the corpus is exhausted."
+    },
+    {
+      "id": "buildPrompt",
+      "name": "Build prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const TPL = \"You are the head writer for \\\"Sun Tzu, Today\\\", a short-form video series that\\ntakes ONE verbatim maxim from Sun Tzu's Art of War and stages it as a self-contained\\nmodern micro-drama. Real, timeless strategy applied to a relatable contemporary dilemma.\\n\\nTODAY'S MAXIM (quote it VERBATIM — do not paraphrase):\\n  \\\"{{MAXIM}}\\\"\\n  — {{VERSEREF}}, The Art of War (Sun Tzu, tr. Lionel Giles, 1910; public domain)\\n\\nCAST (only these three may speak; each scene's leading character must be one of them):\\n  - The Strategist — a timeless Sun Tzu-style mentor. MUST be the leading character in\\n    Scene 1 (states today's maxim as a cold open) and Scene 7 (closes by re-stating the\\n    maxim as the takeaway). Calm, grave, economical with words.\\n  - The Student — a modern young professional facing one concrete, relatable dilemma\\n    (a toxic boss, a bidding war, a betrayal, a negotiation, a breakup, a startup gamble).\\n  - The Rival — the adversary in that dilemma (boss / competitor / opponent). Sharp, cold.\\n\\nTONE: Cinematic, a little noir, quietly intense. The drama is ordinary modern life;\\nthe gravity comes from the ancient maxim landing on it. No violence-glorifying, no slurs.\\n\\nSTRUCTURE — exactly 7 scenes:\\n  1. The Strategist states today's maxim (verbatim) as a cold open.\\n  2–3. The Student's modern dilemma; The Rival escalates it.\\n  4–5. The Student applies the maxim and turns the situation.\\n  6. The resolution.\\n  7. The Strategist closes, re-stating the maxim verbatim — this is the screenshot caption card.\\n\\nPER-SCENE REQUIREMENTS:\\n  - ~200 words of prose describing visuals, action and atmosphere (brief it like a\\n    director: location, light, what just happened, what's happening now). Lean on the\\n    chiaroscuro ink-and-steel look: deep shadow, one warm gold light.\\n  - Exactly ONE spoken dialog line per scene, 8–12 words, attributed to the leading\\n    character. Make it land. Do NOT end the dialog line with a period (\\\"!\\\" or \\\"?\\\" are fine).\\n  - Only the three cast may speak.\\n\\nOUTPUT — reply with ONLY the markdown document below — no preamble, no\\ntriple-backtick fences, nothing after it:\\n\\n  # Sun Tzu, Today — {{VERSEREF}}\\n  **Generated (UTC):** {{TS}}\\n  **Maxim:** \\\"{{MAXIM}}\\\" — {{VERSEREF}}, The Art of War (tr. Lionel Giles, 1910)\\n\\n  ## Social title: <punchy title for social posting, 50 characters MAX>\\n\\n  ## Headlines we drew from:\\n  - \\\"{{MAXIM}}\\\" — {{VERSEREF}}, The Art of War (Sun Tzu)\\n\\n  ## Scene 1 — <short title>\\n  **Leading character:** The Strategist\\n  **Dialog:** \\\"<8–12 word line>\\\"\\n\\n  <~200 words of scene prose>\\n\\n  ... (continue through Scene 7, which is again The Strategist) ...\";\n\n// The Sun Tzu, Today head-writer prompt, adapted from show/SunTzuToday/compute.js.\n// One change vs the showrunner original: the file-write OUTPUT step becomes\n// \"reply with only the markdown\", plus a requested '## Social title:' line so\n// ONE model call covers both the story and the ≤50-char social title.\nconst ts = new Date().toISOString();\nconst p = $json;\nconst fill = (t, map) => t.replace(/\\{\\{(\\w+)\\}\\}/g, (m, k) => (map[k] === undefined ? m : map[k]));\nconst prompt = fill(TPL, { TS: ts, MAXIM: p.maxim, VERSEREF: p.verseRef });\nreturn [{ json: { prompt } }];"
+      }
+    },
+    {
+      "id": "writeStory",
+      "name": "Write story (Claude)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1400,
+        300
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { model: 'claude-opus-4-8', max_tokens: 16000, thinking: { type: 'adaptive' }, messages: [ { role: 'user', content: $json.prompt } ] } }}",
+        "options": {
+          "timeout": 600000
+        },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth"
+      },
+      "notes": "Messages API over raw HTTP (no SDK inside n8n). Auth via the 'Anthropic API key' Header Auth credential (header name x-api-key). Adaptive thinking; the story lands in the response's text block.",
+      "credentials": {
+        "httpHeaderAuth": {
+          "name": "Anthropic API key"
+        }
+      }
+    },
+    {
+      "id": "storyPayload",
+      "name": "Build story payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1600,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Extract the story markdown from the Claude response, then port of\n// storyToDescription() from show/showrunner/story-format.js: drop everything\n// before the first '## Scene', collapse each scene's prose to one line, append\n// `<Char> says: \"<dialog>\"`, mapping names through the cast map (CAST_ALIASES\n// in show/SunTzuToday/show.env).\nconst resp = $json;\nif (resp.stop_reason === 'refusal') throw new Error('Claude declined the request (stop_reason: refusal)');\nconst story = (resp.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\\n');\nif (!/## Scene/.test(story)) throw new Error('Claude response contains no \"## Scene\" blocks — not a story');\n\n// ≤50-char social title from the requested '## Social title:' line\nlet socialTitle = '';\nconst mTitle = story.match(/^##\\s*Social title:\\s*(.+)$/mi);\nif (mTitle) socialTitle = [...mTitle[1].trim().replace(/^\"|\"$/g, '')].slice(0, 50).join('');\n\n// caption from the headlines bullets\nconst capLines = [];\nconst hm = story.match(/## Headlines we drew from:\\n([\\s\\S]*?)\\n##/);\nif (hm) for (const l of hm[1].split('\\n')) { const t = l.replace(/^-\\s*/, '').trim(); if (t) capLines.push(t); }\nconst socialCaption = capLines.slice(0, 6).join(' · ').slice(0, 400);\n\nconst ALIASES = {\"The Strategist\":\"The Strategist\",\"The Student\":\"The Student\",\"The Rival\":\"The Rival\"};\nconst mapShort = (name) => { for (const k of Object.keys(ALIASES)) if (name.includes(k)) return ALIASES[k]; return String(name).trim(); };\n\nconst lines = story.split(/\\r?\\n/);\nlet inScene = false, n = 0, prose = '', character = '', dialog = '';\nconst parts = [];\nconst emit = () => {\n  if (!inScene) return;\n  const p = prose.replace(/[ \\t]+/g, ' ').trim();\n  const s = mapShort(character);\n  parts.push(n === 0 ? '- ' + p + ' ' + s + ' says: \"' + dialog + '\"' : '\\n\\n  - ' + p + ' ' + s + ' says: \"' + dialog + '\"');\n  n++;\n};\nfor (const line of lines) {\n  if (/^## Scene/.test(line)) { emit(); inScene = true; prose = ''; character = ''; dialog = ''; continue; }\n  if (!inScene) continue;\n  if (/^\\*\\*Leading character:\\*\\*/.test(line)) { character = line.replace(/^\\*\\*Leading character:\\*\\*[ \\t]*/, ''); continue; }\n  if (/^\\*\\*Dialog:\\*\\*/.test(line)) { dialog = line.replace(/^\\*\\*Dialog:\\*\\*[ \\t]*/, '').trim().replace(/^\"|\"$/g, '').replace(/[.。]$/, ''); continue; }\n  if (/^##/.test(line)) { emit(); inScene = false; continue; }\n  prose += ' ' + line;\n}\nemit();\nif (!parts.length) throw new Error('no scenes parsed from the story');\nconst plot = parts.join('');\nreturn [{ json: { plot, socialTitle, socialCaption, scenes: n, story } }];"
+      },
+      "notes": "The story markdown is preserved on this node's output — n8n's execution log is the story archive (the showrunner's stories/ equivalent)."
+    },
+    {
+      "id": "enginePayload",
+      "name": "Build engine payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1800,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Shape the engine call: episode mode in the pinned Sun Tzu, Today campaign, the\n// story as the new episode's plot, optional soundtrack pin. The engine's\n// sub-workflow trigger is passthrough — this item IS the payload (same shape\n// as the engine webhook's body). Re-delivered same-day stories are diff-aware\n// on the engine side, so a duplicate run doesn't re-bill unchanged work.\nconst cfg = $('Show config').first().json;\nif (!cfg.campaignId) throw new Error('Show config: campaignId is empty');\nconst movie = { plot: $json.plot };\nif (cfg.soundtrackAudioPath) {\n  movie.soundtrackAudioPath = cfg.soundtrackAudioPath;\n  if (cfg.soundtrackVolume) movie.soundtrackVolume = Number(cfg.soundtrackVolume);\n}\nreturn [{ json: { target: { mode: 'episode', campaignId: cfg.campaignId }, changes: { movie }, chatWebhookUrl: '' } }];"
+      }
+    },
+    {
+      "id": "callEngine",
+      "name": "Call engine",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        2000,
+        300
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000,
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "",
+          "cachedResultName": "YakYak engine — resolve target, patch or new episode, render, post"
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "notes": "Fires the generic YakYak engine in episode mode. The engine only responds once the episode is generated AND rendered. Retry is safe: a re-run lands on the same unrendered slot. Announcement happens here (below), not in the engine."
+    },
+    {
+      "id": "advanceCursor",
+      "name": "Advance cursor",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2200,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Persist the cursor only AFTER the engine returned a rendered episode, so a\n// failed run re-runs the SAME maxim next time (parity with the showrunner,\n// whose cursor is the count of committed story files). Only active executions\n// persist static data — manual test runs won't advance the cursor.\nconst sd = $getWorkflowStaticData('global');\nsd.sunTzuCursor = Number($('Pick maxim').first().json.cursor) + 1;\nreturn $input.all();"
+      }
+    },
+    {
+      "id": "setSocial",
+      "name": "Set social fields",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2400,
+        300
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Show config').first().json.apiBase }}/workflow/update-movie-social-description",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ Object.assign({ movieId: $json.movieId }, $('Build story payload').first().json.socialTitle ? { socialTitle: $('Build story payload').first().json.socialTitle } : {}, $('Build story payload').first().json.socialCaption ? { socialDescription: $('Build story payload').first().json.socialCaption } : {}) }}",
+        "options": {},
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth"
+      },
+      "notes": "Showrunner parity: ≤50-char social title + caption. onError=continue — cosmetic metadata must not kill a rendered episode.",
+      "credentials": {
+        "httpBearerAuth": {
+          "name": "YakYak API"
+        }
+      }
+    },
+    {
+      "id": "announce",
+      "name": "Announce",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2600,
+        300
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Show config').first().json.chatWebhookUrl }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { text: '⚔️ Sun Tzu, Today episode ready — \"' + ($('Build story payload').first().json.socialTitle || 'Latest maxim') + '\": ' + $('Call engine').first().json.url } }}",
+        "options": {}
+      },
+      "notes": "Review-first output event (the safe default). chatWebhookUrl empty → this node errors and the run still succeeds (onError=continue). Auto-posting to social is the deliberate next step — see the BBN guide §4.3."
+    }
+  ],
+  "connections": {
+    "Mon Wed Fri": {
+      "main": [
+        [
+          {
+            "node": "Show config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Show config": {
+      "main": [
+        [
+          {
+            "node": "Fetch user",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch user": {
+      "main": [
+        [
+          {
+            "node": "Balance guard",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Balance guard": {
+      "main": [
+        [
+          {
+            "node": "Fetch corpus",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch corpus": {
+      "main": [
+        [
+          {
+            "node": "Pick maxim",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pick maxim": {
+      "main": [
+        [
+          {
+            "node": "Build prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build prompt": {
+      "main": [
+        [
+          {
+            "node": "Write story (Claude)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write story (Claude)": {
+      "main": [
+        [
+          {
+            "node": "Build story payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build story payload": {
+      "main": [
+        [
+          {
+            "node": "Build engine payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build engine payload": {
+      "main": [
+        [
+          {
+            "node": "Call engine",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call engine": {
+      "main": [
+        [
+          {
+            "node": "Advance cursor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Advance cursor": {
+      "main": [
+        [
+          {
+            "node": "Set social fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set social fields": {
+      "main": [
+        [
+          {
+            "node": "Announce",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}

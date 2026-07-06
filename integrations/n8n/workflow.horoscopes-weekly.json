@@ -1,0 +1,350 @@
+{
+  "name": "Cosmic Brief (Horoscopes) — weekly episode (front-end for the YakYak engine)",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "executionTimeout": 3600
+  },
+  "nodes": [
+    {
+      "id": "schedule",
+      "name": "Every Sunday",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        300
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 6 * * 0"
+            }
+          ]
+        }
+      },
+      "notes": "06:00 UTC Sundays — CADENCE=weekly in show/Horoscopes/show.env (the showrunner planner runs weekly shows on Sundays). Use 'Test workflow' to fire a run by hand."
+    },
+    {
+      "id": "showConfig",
+      "name": "Show config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        200,
+        300
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "cfg-campaign",
+              "name": "campaignId",
+              "value": "",
+              "type": "string"
+            },
+            {
+              "id": "cfg-userid",
+              "name": "userId",
+              "value": "",
+              "type": "string"
+            },
+            {
+              "id": "cfg-mintoken",
+              "name": "minTokenBalance",
+              "value": 2000,
+              "type": "number"
+            },
+            {
+              "id": "cfg-apibase",
+              "name": "apiBase",
+              "value": "https://api.yakyak.ai",
+              "type": "string"
+            },
+            {
+              "id": "cfg-soundtra",
+              "name": "soundtrackAudioPath",
+              "value": "",
+              "type": "string"
+            },
+            {
+              "id": "cfg-soundtra",
+              "name": "soundtrackVolume",
+              "value": 30,
+              "type": "number"
+            },
+            {
+              "id": "cfg-chatwebh",
+              "name": "chatWebhookUrl",
+              "value": "",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "notes": "ALL per-show config lives here, on the canvas — the workflow reads no environment variables. Required: campaignId (a campaign the API credential's account owns) and userId (for the balance check). Optional: soundtrackAudioPath (empty = skip the pin), chatWebhookUrl (empty = no announcement). No Anthropic credential needed — this show is fully computed."
+    },
+    {
+      "id": "fetchUser",
+      "name": "Fetch user",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        400,
+        300
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.apiBase }}/users/{{ $json.userId }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "credentials": {
+        "httpBearerAuth": {
+          "name": "YakYak API"
+        }
+      },
+      "notes": "Same 'YakYak API' Bearer credential as the engine — no token on the canvas or in env. onError=continue so Balance guard can report a clear error instead of a bare 404."
+    },
+    {
+      "id": "balanceGuard",
+      "name": "Balance guard",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        600,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Abort BEFORE burning a partial episode — an episode renders every scene (💸).\n// Mirrors MIN_TOKEN_BALANCE=2000 in show/Horoscopes/show.env.\n// Doubles as the config preflight, so an unfilled Show config fails here in\n// seconds — not after the story step.\nconst cfg = $('Show config').first().json;\nif (!cfg.campaignId) throw new Error('Show config: campaignId is empty — set it to a campaign id the API credential\\'s account owns');\nif (!cfg.userId) throw new Error('Show config: userId is empty — set it to the YakYak user id the API credential belongs to');\nconst user = $json;\nif (user.tokenBalance === undefined) throw new Error('could not fetch the user record — check Show config userId and the \"YakYak API\" credential (' + (user.error?.message || 'no tokenBalance in response') + ')');\nconst balance = Number(user.tokenBalance || 0);\nconst min = Number(cfg.minTokenBalance || 2000);\nif (balance < min) throw new Error('token balance ' + balance + ' is below the ' + min + ' minimum — top up before generating an episode');\nreturn [{ json: { balance } }];"
+      }
+    },
+    {
+      "id": "computeStory",
+      "name": "Compute story",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        800,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Deterministic weekly story — JS port of show/Horoscopes/compute.py, replacing\n// the whole prompt/model stage: no Claude call, no Anthropic credential, no\n// network. Same 14-scene structure and house rules (unique advice per sign,\n// \"This Week's Advice for <Sign>;\" spoken openers, no trailing period). One\n// deliberate difference: picks are keyed by FNV-1a + mulberry32 instead of\n// Python's sha256, so for the same ISO week the WORDING differs from a\n// showrunner run — but it is equally deterministic (same week in -> same story out).\nconst GURU = 'The Cosmic Guru';\nconst SIGNS = [\n  ['Aries', 'the Ram', 'Fire'],\n  ['Taurus', 'the Bull', 'Earth'],\n  ['Gemini', 'the Twins', 'Air'],\n  ['Cancer', 'the Crab', 'Water'],\n  ['Leo', 'the Lion', 'Fire'],\n  ['Virgo', 'the Maiden', 'Earth'],\n  ['Libra', 'the Scales', 'Air'],\n  ['Scorpio', 'the Scorpion', 'Water'],\n  ['Sagittarius', 'the Archer', 'Fire'],\n  ['Capricorn', 'the Goat', 'Earth'],\n  ['Aquarius', 'the Water-Bearer', 'Air'],\n  ['Pisces', 'the Fish', 'Water'],\n];\nconst DOMAINS = ['love', 'work', 'money', 'health', 'friendship', 'creativity', 'travel', 'rest'];\nconst MOODS = ['bold', 'cautious', 'playful', 'restless', 'grounded', 'tender', 'sharp', 'dreamy'];\n// Advice is DEALT WITHOUT REPLACEMENT across the 12 signs, so this bank must\n// hold at least 12 distinct lines — same bank as compute.py.\nconst ADVICE = [\n  'say the thing you keep rehearsing',\n  'let one plan quietly fall through',\n  'spend the small money, save the big yes',\n  \"answer the message you've been dodging\",\n  \"leave the party while it's still good\",\n  'make the list, then ignore item one',\n  'trust the slower of your two instincts',\n  'close the tab, open the window',\n  'keep the promise you made to yourself',\n  'ask the question you already know the answer to',\n  'let the silence do the talking',\n  'finish the thing that is almost done',\n  'give the favor before it is asked for',\n  'walk the long way home on purpose',\n  'save your yes for the thing that scares you',\n  'forgive the version of you from last week',\n  \"cancel the plan you're already dreading\",\n  'send the thank-you a day too early',\n  'keep one secret just for yourself',\n  'let the small mistake stay small',\n  'choose the chair facing the door',\n  'say no without the paragraph after it',\n  'take the photo, then put the phone away',\n  'start the boring task first',\n  'let them be wrong about you',\n  'pay for the better coffee today',\n  'write it down before you trust your memory',\n  'leave room in the day for nothing',\n  \"call the person, don't text them\",\n  \"quit the game while you're ahead\",\n  'hold the door open one more minute',\n  'let the compliment land without deflecting',\n  'pack lighter than you think you need',\n  'sleep on the angry reply',\n  'take the smaller portion of the blame',\n  'say the name of the thing you fear',\n  'let one chore wait until tomorrow',\n  'take the scenic route to nowhere',\n  'tell them the good news first',\n  'keep the receipt, lose the regret',\n  'stop explaining once they understand',\n  'choose the harder of two easy roads',\n  'let the old grudge get off here',\n  'ask for help before you need it',\n  'spend an hour doing nothing useful',\n  'say less in the meeting today',\n  'trust the note you left yourself',\n  'unfollow the thing that makes you smaller',\n  'finish the book before you start the new one',\n  'keep your word on the small ask',\n  \"take the stairs you've been avoiding\",\n  'say the apology without the \"but\"',\n  'let the plan change without panicking',\n  'give the last word away on purpose',\n  'turn the radio off and just drive',\n  'choose curiosity over being right',\n  \"let the bread rise, don't rush it\",\n  \"mail the letter you've been writing\",\n  'trade one scroll for one walk',\n  \"let tomorrow's worry stay in tomorrow\",\n  'drink the water before the coffee',\n  \"thank the person who can't help you\",\n  'let the early morning be yours alone',\n  'keep the plant you keep forgetting alive',\n];\nconst SETTINGS = [\n  'a rooftop where the city hums below',\n  'a kitchen at the blue hour before dawn',\n  'a crowded train that suddenly empties',\n  'a quiet office after everyone has left',\n  'a market stall stacked with strange fruit',\n  'a shoreline arguing politely with the tide',\n  'a stairwell that echoes one floor too far',\n  'a garden that has opinions about the weather',\n];\nconst COSMIC = [\n  'Mercury drags its feet',\n  'the Moon changes its mind',\n  'Venus sends a read receipt',\n  'Mars taps its foot',\n  'Saturn audits the receipts',\n  'Jupiter overpromises again',\n  'a quiet eclipse clears its throat',\n  'the stars file an amended forecast',\n];\nconst ADVICE_OPENERS = [\n  \"This Week's Advice\",\n  \"This Week's Guidance\",\n  \"This Week's Counsel\",\n  \"This Week's Wisdom\",\n  'Your Weekly Counsel',\n  'Your Weekly Guidance',\n  \"The Week's Wisdom\",\n];\nconst GURU_OUTLOOK = [\n  'the week rewards patience over speed for every sign',\n  'a slow start hides a strong finish this week',\n  'the stars favor honesty over cleverness right now',\n  'rest is the assignment before the breakthrough',\n  'small kept promises outshine grand new plans',\n  'listen twice as often as you speak this week',\n  'the brave move this week is the gentle one',\n  \"let what is ending end, and make room for what's next\",\n];\nconst GURU_CLOSING = [\n  'let the starlight settle in your bones and walk on',\n  'the wheel turns whether you watch or not, so turn with it',\n  'carry one ember of the cosmos and let the dark keep the rest',\n  'what the stars whispered, let your silence answer',\n  'step into the week as through a door only you can see',\n  'the tide that pulls you also remembers the way back',\n  'hold the omen lightly and it will hold you',\n  'the heavens have drawn the map, but the walking is yours',\n  'may the constellations keep your name on their tongue',\n  'trust the long orbit, even where the path runs dark',\n  'let what is written in light stay lighter than your worries',\n  'the veil thins for those who move gently, so move gently',\n  'gather the small magics and leave the doubt behind',\n  'every star you have ever seen has already wished you onward',\n  'go where the moon leans and you will not be lost',\n  'the sky closes its eye now, so keep yours open to wonder',\n];\n\nfunction h32(s) { let h = 0x811c9dc5; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193); } return h >>> 0; }\nfunction mulberry32(a) { return function () { a |= 0; a = (a + 0x6d2b79f5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }\nconst pickB = (bank, ...keys) => bank[h32(keys.join('|')) % bank.length];\n// deal `count` DISTINCT items (seeded Fisher-Yates, then the first `count`)\nconst dealUnique = (bank, count, ...keys) => {\n  const rng = mulberry32(h32(keys.join('|') + '|deal'));\n  const p = bank.slice();\n  for (let i = p.length - 1; i > 0; i--) { const j = Math.floor(rng() * (i + 1)); const t = p[i]; p[i] = p[j]; p[j] = t; }\n  return p.slice(0, count);\n};\nconst cap = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);\n\n// ISO week (UTC)\nconst now = new Date();\nconst t = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));\nconst dow = t.getUTCDay() || 7;\nt.setUTCDate(t.getUTCDate() + 4 - dow);\nconst year = t.getUTCFullYear();\nconst week = Math.ceil(((t.getTime() - Date.UTC(year, 0, 1)) / 86400000 + 1) / 7);\nconst ts = now.toISOString();\n\n// one unique advice per sign — dealt without replacement for the whole week\nconst dealt = dealUnique(ADVICE, SIGNS.length, year, week, 'advice');\nconst adviceFor = {};\nSIGNS.forEach((s, i) => { adviceFor[s[0]] = dealt[i]; });\nconst outlook = pickB(GURU_OUTLOOK, year, week, 'outlook');\nconst closing = pickB(GURU_CLOSING, year, week, 'closing');\n\nconst out = [];\nout.push('# Cosmic Brief — Weekly Horoscopes');\nout.push('**Generated (UTC):** ' + ts);\nout.push('**For:** ISO week ' + week + ', ' + year);\nout.push('');\nout.push('## Headlines we drew from:');\nout.push(\"- The Cosmic Guru's outlook: \" + outlook);\nfor (const [name, , element] of SIGNS) {\n  out.push('- ' + name + ' (' + element + '): a ' + pickB(MOODS, year, week, name, 'mood') + ' week for ' + pickB(DOMAINS, year, week, name, 'domain'));\n}\nout.push('');\n\nout.push('## Scene 1 — The Cosmic Guru opens the week');\nout.push('**Leading character:** ' + GURU);\nout.push('**Dialog:** \"This Week\\'s Cosmic Outlook; ' + cap(outlook) + '\"');\nout.push('');\nout.push('Exterior of the heavens: ' + pickB(SETTINGS, year, week, 'guru-intro-setting') + ', reimagined as a vast starlit observatory. The Cosmic Guru — a serene celestial sage in a star-woven robe, a constellation haloing their brow — faces the lens like a trusted teacher beginning a lesson. They sweep one hand across the zodiac wheel turning slowly overhead and name the mood of the whole week before any single sign steps forward. The palette is deep indigo and gold; the camera drifts slow and contemplative. This is the frame the rest of the readings hang on — calm, unhurried, certain.');\nout.push('');\n\nSIGNS.forEach((sign, offset) => {\n  const name = sign[0], persona = sign[1], element = sign[2];\n  const domain = pickB(DOMAINS, year, week, name, 'domain');\n  const mood = pickB(MOODS, year, week, name, 'mood');\n  const advice = adviceFor[name];\n  const setting = pickB(SETTINGS, year, week, name, 'setting');\n  const cosmic = pickB(COSMIC, year, week, name, 'cosmic');\n  const opener = pickB(ADVICE_OPENERS, year, week, name, 'advice-opener');\n  out.push('## Scene ' + (offset + 2) + ' — ' + name);\n  out.push('**Leading character:** ' + name + ' ' + persona);\n  out.push('**Dialog:** \"' + opener + ' for ' + name + '; ' + cap(advice) + '\"');\n  out.push('');\n  out.push('Interior/exterior: ' + setting + '. We find ' + name + ' ' + persona + ', a ' + mood + ' ' + element.toLowerCase() + '-sign avatar lit so their accent color glows at the edges. The week\\'s transit is plain: ' + cosmic + ', and ' + name + ' feels it in the ' + domain + ' corner of their life. The camera drifts slow and contemplative — this is a reading, not a chase. Around them the scene rhymes with the forecast: small omens, a flickering sign, an object that lands exactly where it was aimed. ' + name + ' weighs the advice to ' + advice + ', and for one held beat we see them decide. Nothing explodes; the drama is internal, the kind a viewer recognizes in themselves. The accent color pulses once as the resolution settles, and the avatar turns toward the lens like a friend who already knows what you\\'ll do with the week.');\n  out.push('');\n});\n\nout.push('## Scene 14 — The Cosmic Guru closes the week');\nout.push('**Leading character:** ' + GURU);\nout.push('**Dialog:** \"Parting Words from the Cosmos; ' + cap(closing) + '\"');\nout.push('');\nout.push('Exterior of the heavens again: ' + pickB(SETTINGS, year, week, 'guru-outro-setting') + ', the zodiac wheel now come full circle behind The Cosmic Guru. The same star-woven sage draws the twelve readings back together, the accent colors of all twelve signs flickering once in the nebula like a roll call. They offer a single parting thought for everyone, hands lowering in a calm blessing as the constellation halo dims. The camera pulls back slow and contemplative until the whole sky is in frame — a quiet button on the week, certain and kind.');\n\nconst story = out.join('\\n').replace(/\\s+$/, '') + '\\n';\nconst socialTitle = ('Cosmic Brief — Week ' + week + ', ' + year).slice(0, 50);\nconst capBits = ['Cosmic outlook: ' + outlook];\nfor (const [name, , ] of SIGNS.slice(0, 3)) capBits.push(name + ': a ' + pickB(MOODS, year, week, name, 'mood') + ' week for ' + pickB(DOMAINS, year, week, name, 'domain'));\nconst socialCaption = capBits.join(' · ').slice(0, 400);\nreturn [{ json: { story, socialTitle, socialCaption, week, year } }];"
+      },
+      "notes": "The whole story stage: deterministic, offline, model-free. This node replaces the three fetch nodes + Claude call of the prompt-sourced shows."
+    },
+    {
+      "id": "storyPayload",
+      "name": "Build story payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1000,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Port of storyToDescription() from show/showrunner/story-format.js: drop\n// everything before the first '## Scene', collapse each scene's prose to one\n// line, append `<Char> says: \"<dialog>\"`, mapping names through the cast map\n// (CAST_ALIASES in show/Horoscopes/show.env). The story markdown comes from the\n// deterministic Compute story node (no model in this show), which also\n// supplies the social title + caption.\nconst story = String($json.story || '');\nif (!/## Scene/.test(story)) throw new Error('Compute story emitted no \"## Scene\" blocks — not a story');\nconst socialTitle = String($json.socialTitle || '').slice(0, 50);\nconst socialCaption = String($json.socialCaption || '').slice(0, 400);\n\nconst ALIASES = {\"The Cosmic Guru\":\"The Cosmic Guru\",\"Aries\":\"Aries\",\"Taurus\":\"Taurus\",\"Gemini\":\"Gemini\",\"Cancer\":\"Cancer\",\"Leo\":\"Leo\",\"Virgo\":\"Virgo\",\"Libra\":\"Libra\",\"Scorpio\":\"Scorpio\",\"Sagittarius\":\"Sagittarius\",\"Capricorn\":\"Capricorn\",\"Aquarius\":\"Aquarius\",\"Pisces\":\"Pisces\"};\nconst mapShort = (name) => { for (const k of Object.keys(ALIASES)) if (name.includes(k)) return ALIASES[k]; return String(name).trim(); };\n\nconst lines = story.split(/\\r?\\n/);\nlet inScene = false, n = 0, prose = '', character = '', dialog = '';\nconst parts = [];\nconst emit = () => {\n  if (!inScene) return;\n  const p = prose.replace(/[ \\t]+/g, ' ').trim();\n  const s = mapShort(character);\n  parts.push(n === 0 ? '- ' + p + ' ' + s + ' says: \"' + dialog + '\"' : '\\n\\n  - ' + p + ' ' + s + ' says: \"' + dialog + '\"');\n  n++;\n};\nfor (const line of lines) {\n  if (/^## Scene/.test(line)) { emit(); inScene = true; prose = ''; character = ''; dialog = ''; continue; }\n  if (!inScene) continue;\n  if (/^\\*\\*Leading character:\\*\\*/.test(line)) { character = line.replace(/^\\*\\*Leading character:\\*\\*[ \\t]*/, ''); continue; }\n  if (/^\\*\\*Dialog:\\*\\*/.test(line)) { dialog = line.replace(/^\\*\\*Dialog:\\*\\*[ \\t]*/, '').trim().replace(/^\"|\"$/g, '').replace(/[.。]$/, ''); continue; }\n  if (/^##/.test(line)) { emit(); inScene = false; continue; }\n  prose += ' ' + line;\n}\nemit();\nif (!parts.length) throw new Error('no scenes parsed from the story');\nconst plot = parts.join('');\nreturn [{ json: { plot, socialTitle, socialCaption, scenes: n, story } }];"
+      },
+      "notes": "The story markdown is preserved on this node's output — n8n's execution log is the story archive (the showrunner's stories/ equivalent)."
+    },
+    {
+      "id": "enginePayload",
+      "name": "Build engine payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Shape the engine call: episode mode in the pinned Cosmic Brief campaign, the\n// story as the new episode's plot, optional soundtrack pin. The engine's\n// sub-workflow trigger is passthrough — this item IS the payload (same shape\n// as the engine webhook's body). Re-delivered same-day stories are diff-aware\n// on the engine side, so a duplicate run doesn't re-bill unchanged work.\nconst cfg = $('Show config').first().json;\nif (!cfg.campaignId) throw new Error('Show config: campaignId is empty');\nconst movie = { plot: $json.plot };\nif (cfg.soundtrackAudioPath) {\n  movie.soundtrackAudioPath = cfg.soundtrackAudioPath;\n  if (cfg.soundtrackVolume) movie.soundtrackVolume = Number(cfg.soundtrackVolume);\n}\nreturn [{ json: { target: { mode: 'episode', campaignId: cfg.campaignId }, changes: { movie }, chatWebhookUrl: '' } }];"
+      }
+    },
+    {
+      "id": "callEngine",
+      "name": "Call engine",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        1400,
+        300
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000,
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "",
+          "cachedResultName": "YakYak engine — resolve target, patch or new episode, render, post"
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "notes": "Fires the generic YakYak engine in episode mode. The engine only responds once the episode is generated AND rendered. Retry is safe: a re-run lands on the same unrendered slot. Announcement happens here (below), not in the engine. A Cosmic Brief episode is 14 scenes (💸) — the weekly cadence keeps the spend predictable."
+    },
+    {
+      "id": "setSocial",
+      "name": "Set social fields",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1600,
+        300
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Show config').first().json.apiBase }}/workflow/update-movie-social-description",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ Object.assign({ movieId: $json.movieId }, $('Build story payload').first().json.socialTitle ? { socialTitle: $('Build story payload').first().json.socialTitle } : {}, $('Build story payload').first().json.socialCaption ? { socialDescription: $('Build story payload').first().json.socialCaption } : {}) }}",
+        "options": {},
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth"
+      },
+      "notes": "Showrunner parity: ≤50-char social title + caption. onError=continue — cosmetic metadata must not kill a rendered episode.",
+      "credentials": {
+        "httpBearerAuth": {
+          "name": "YakYak API"
+        }
+      }
+    },
+    {
+      "id": "announce",
+      "name": "Announce",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1800,
+        300
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Show config').first().json.chatWebhookUrl }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { text: '✨ Cosmic Brief episode ready — \"' + ($('Build story payload').first().json.socialTitle || 'Weekly horoscopes') + '\": ' + $('Call engine').first().json.url } }}",
+        "options": {}
+      },
+      "notes": "Review-first output event (the safe default). chatWebhookUrl empty → this node errors and the run still succeeds (onError=continue). Auto-posting to social is the deliberate next step — see the BBN guide §4.3."
+    }
+  ],
+  "connections": {
+    "Every Sunday": {
+      "main": [
+        [
+          {
+            "node": "Show config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Show config": {
+      "main": [
+        [
+          {
+            "node": "Fetch user",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch user": {
+      "main": [
+        [
+          {
+            "node": "Balance guard",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Balance guard": {
+      "main": [
+        [
+          {
+            "node": "Compute story",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compute story": {
+      "main": [
+        [
+          {
+            "node": "Build story payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build story payload": {
+      "main": [
+        [
+          {
+            "node": "Build engine payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build engine payload": {
+      "main": [
+        [
+          {
+            "node": "Call engine",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call engine": {
+      "main": [
+        [
+          {
+            "node": "Set social fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set social fields": {
+      "main": [
+        [
+          {
+            "node": "Announce",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}
