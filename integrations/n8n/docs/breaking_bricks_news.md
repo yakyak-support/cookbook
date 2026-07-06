@@ -29,7 +29,7 @@ The daily BBN run (`upload_to_yakyak.py --show show/BreakingBricksNews`, schedul
 | 8 | **Pin the BBN intro track** — `set-soundtrack-audio {movieId, audioPath}` + `set-soundtrack {movieId, volumePercentage: 45}` | ✅ **in the engine** — optional `changes.movie.soundtrackAudioPath` / `soundtrackVolume` fields (§4.1) |
 | 9 | **Social title + caption** — headline-derived caption; ≤50-char title via a model call; `update-movie-social-description` | ✅ **in the front-end** — title folded into the story call; **Set social fields** node (§4.2) |
 | 10 | **Render** — `export-render {force:true}`, poll to completion | ✅ **already in the engine** |
-| 11 | **Post** — publish to social (`POST="true"`), or render-only | Review-first chat webhook (**Announce** node); social posting is the deliberate opt-in (§4.3) |
+| 11 | **Post** — publish to social (`POST="true"`), or render-only | ✅ **in the front-end** — **Fetch campaign links** + **Build post list** + **Post to socials**, gated by Show config `postToSocial` (default **true**, matching BBN's `POST="true"`) (§4.3) |
 | 12 | **Archive the story file** to `stories/<UTC>_latest_update.md` | The story markdown is preserved on **Build story payload**'s output in every execution (§4.4) |
 
 Steps 5–7 and 10 — the hard, stateful part — are exactly what episode mode was built for,
@@ -68,7 +68,7 @@ finished `movieId`/`url` back synchronously and can finalize.
 
 ## 3. The BBN front-end workflow, node by node (as built)
 
-The importable file is [`workflow.bbn-daily.json`](../workflow.bbn-daily.json) — 14 nodes,
+The importable file is [`workflow.bbn-daily.json`](../workflow.bbn-daily.json) — 17 nodes,
 one straight line. **No environment variables anywhere:** per-show config lives in the
 **Show config** Set node on the canvas, and both authenticated calls use n8n credentials —
 same rule as the engine, so a stock n8n container runs it unmodified:
@@ -101,7 +101,13 @@ Every morning (cron 0 6 * * *)
  └► Set social fields      HTTP — update-movie-social-description, 'YakYak API'
  │                          credential, continue-on-error
  └► Announce               HTTP — post title + movie URL to Show config's chatWebhookUrl,
-                            continue-on-error (empty URL = node fails, run stays green)
+ │                          continue-on-error (empty URL = node fails, run stays green)
+ └► Fetch campaign links   HTTP — GET /social/campaign-links/{campaignId}, 'YakYak API'
+ │                          credential (§4.3)
+ └► Build post list        Code — the postToSocial gate; one item per linked network
+ │                          (zero items = nothing to post, run stays green)
+ └► Post to socials        HTTP — POST /social/post-movie/{movieId}/{connectedNetworkId}
+                            once per network, empty body, continue-on-error per network
 ```
 
 Design notes, in the order they'll matter:
@@ -177,13 +183,28 @@ POST /workflow/update-movie-social-description
 
 It runs *continue-on-error* — cosmetic metadata must never kill a rendered episode.
 
-### 4.3 Posting (`POST="true"`)
-BBN is the cookbook's auto-posting show. Options, in order of increasing commitment:
-review-first (chat webhook only — the default here), n8n's native YouTube/Instagram
-nodes, or the YakYak social endpoints demonstrated in
-[`course/08-social-post`](../../../course/08-social-post/). Posting is irreversible;
-keep it behind an explicit IF node on a `post: true` payload flag, mirroring the
-showrunner's `--post` gate.
+### 4.3 Posting (`POST="true"`) — implemented
+BBN is the cookbook's auto-posting show (`POST="true"` in `show.env`), and the
+front-end mirrors the showrunner's post step exactly:
+
+1. **Fetch campaign links** — `GET /social/campaign-links/{campaignId}` lists the
+   networks linked to the campaign (`campaignLinks[].connectedNetworkId`).
+2. **Build post list** — the **gate**: Show config `postToSocial` (default **true**,
+   the `POST="true"` parity; set **false** for review-first runs — chat announcement
+   only). Emits one item per linked network; zero items (gate off, or no networks
+   linked) means nothing downstream fires and the run stays green. If the links call
+   itself failed while the gate is on, this node fails loudly rather than silently
+   skipping the publish.
+3. **Post to socials** — `POST /social/post-movie/{movieId}/{connectedNetworkId}`,
+   empty body, once per network. Per-network 4xx is tolerated (continue-on-error),
+   exactly like the showrunner — one mis-configured account must not block the rest.
+
+**Posting is irreversible**, and it needs two one-time preparations: the
+`social_publishing` scope on the PAT in the `YakYak API` credential, and at least one
+network linked to the campaign (done once at yakyak.ai, or via the API as shown in
+[`course/08-social-post`](../../../course/08-social-post/)). The showrunner's
+interactive confirm prompt has no n8n equivalent — the `postToSocial` flag *is* the
+confirmation, so leave it `false` until the first few episodes look right.
 
 ### 4.4 Story archive
 The showrunner commits each story to `stories/` **from a local run only** — CI never
@@ -219,15 +240,18 @@ Two workflows on one n8n instance, chained with an Execute Workflow sub-call:
 | `userId` | ✅ | The YakYak user id the credential's PAT belongs to (for the balance check). |
 | `minTokenBalance` | — | Default `2000` (`show.env` `MIN_TOKEN_BALANCE`). |
 | `apiBase` | — | Default `https://api.yakyak.ai`; set beta here for test runs. |
-| `soundtrackAudioPath` | — | The intro track's content address — `show.env` `SOUNDTRACK_AUDIO_PATH`. Leave empty to skip the soundtrack pin. |
+| `soundtrackAudioPath` | — | **Ships prefilled** with the BBN intro track's content address (`show.env` `SOUNDTRACK_AUDIO_PATH`) — the `beta/` prefix on a prod campaign is normal (§4.1). Empty it to skip the soundtrack pin. |
 | `soundtrackVolume` | — | `45` (`show.env` `VOLUME`). |
 | `chatWebhookUrl` | — | Slack/Discord/Teams incoming webhook for the announcement. Empty = no announcement (the node fails softly; the run stays green). |
+| `postToSocial` | — | Default `true` (`show.env` `POST="true"`): every run publishes to the campaign's linked networks — **irreversible** (§4.3). Set `false` for review-first runs. |
 
 5. **First run by hand:** open the front-end → **Test workflow** — the Schedule trigger
    fires once immediately. The engine's run shows up nested under the front-end's
    execution. On **beta** first (`apiBase` = `https://api.beta.yakyak.ai` in Show config,
    beta PAT in the `YakYak API` credential, beta campaign id) the whole run is
-   effectively free.
+   effectively free. ⚠️ `postToSocial` ships **true** (BBN's `POST="true"` posture) —
+   if your campaign already has networks linked, a test run **will publish**; flip it
+   to `false` first unless that's what you want (§4.3).
 
 **Runtime shape:** each morning produces two executions — "BBN daily" (spends most of its
 life waiting on the engine sub-workflow) and the nested engine run (slot picking,
@@ -257,7 +281,8 @@ webhook (`/webhook/yakyak-engine` + `x-render-token`) when debugging.
   the same slot (see self-healing above). If stalls prove common, port the re-kick into
   the engine's settled-check as a `resume` call after N unchanged polls.
 - **Secrets:** two n8n credentials, zero env vars — one prod `yy_live_…` PAT with
-  `video_creation` (+ `social_publishing` if §4.3 goes live) in the `YakYak API` Bearer
+  `video_creation` + `social_publishing` (posting is on by default, §4.3; drop the
+  scope only if you also set `postToSocial=false`) in the `YakYak API` Bearer
   credential (shared with the engine), plus the `Anthropic API key` Header Auth
   credential for the story call. Prove the pipeline on **beta** first (beta accounts
   carry a large balance): beta `apiBase` in Show config, beta PAT, beta campaign, same

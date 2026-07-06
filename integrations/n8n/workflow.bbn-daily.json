@@ -68,7 +68,7 @@
             {
               "id": "cfg-track",
               "name": "soundtrackAudioPath",
-              "value": "",
+              "value": "beta/ugc/5c07cc65-fa83-48ef-9050-cf7f4e5fcd47/62c9e486-2a80-49dd-afeb-5c5dba416cb9/a4bd102c-3a8f-44c4-b042-f675e79264e6/audio/2c53f283-6b9f-482a-a8f0-a37ba7b5a194.mp3",
               "type": "string"
             },
             {
@@ -82,12 +82,18 @@
               "name": "chatWebhookUrl",
               "value": "",
               "type": "string"
+            },
+            {
+              "id": "cfg-post",
+              "name": "postToSocial",
+              "value": true,
+              "type": "boolean"
             }
           ]
         },
         "options": {}
       },
-      "notes": "ALL per-show config lives here, on the canvas — the workflow reads no environment variables. Required: campaignId (a campaign the API credential's account owns) and userId (for the balance check). Optional: soundtrackAudioPath (empty = skip the pin), chatWebhookUrl (empty = no announcement)."
+      "notes": "ALL per-show config lives here, on the canvas — the workflow reads no environment variables. Required: campaignId (a campaign the API credential's account owns) and userId (for the balance check). Optional: soundtrackAudioPath (prefilled with the BBN intro track's content address — the beta/ prefix is normal, see docs/forking.md; empty = skip the pin), chatWebhookUrl (empty = no announcement). postToSocial=true is POST=\"true\" parity — every run publishes to the campaign's linked networks (irreversible); set false for review-first runs."
     },
     {
       "id": "fetchUser",
@@ -336,7 +342,74 @@
         "jsonBody": "={{ { text: '🧱 BBN episode ready — \"' + ($('Build story payload').first().json.socialTitle || 'Latest Update') + '\": ' + $('Call engine').item.json.url } }}",
         "options": {}
       },
-      "notes": "Review-first output event (the safe default). chatWebhookUrl empty → this node errors and the run still succeeds (onError=continue). Auto-posting to social is the deliberate next step — see integrations/n8n/docs/breaking_bricks_news.md §4.3."
+      "notes": "Chat notification with the episode link. chatWebhookUrl empty → this node errors and the run still succeeds (onError=continue). Social posting happens in the three nodes after this one, gated by Show config postToSocial — see integrations/n8n/docs/breaking_bricks_news.md §4.3."
+    },
+    {
+      "id": "fetchLinks",
+      "name": "Fetch campaign links",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2600,
+        300
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('Show config').first().json.apiBase }}/social/campaign-links/{{ $('Show config').first().json.campaignId }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "credentials": {
+        "httpBearerAuth": {
+          "name": "YakYak API"
+        }
+      },
+      "notes": "The campaign's linked social networks — GET /social/campaign-links, same call the showrunner makes before posting. Read-only, so it runs regardless; the postToSocial gate is applied in Build post list. onError=continue so Build post list can report a clear error."
+    },
+    {
+      "id": "buildPostList",
+      "name": "Build post list",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2800,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// POST=\"true\" parity: BBN is the cookbook's auto-posting show, so the daily\n// run publishes to every network linked to the campaign — the same fan-out as\n// the showrunner's post step (one /social/post-movie call per campaign link).\n// The gate lives in Show config (postToSocial); set it false for review-first\n// runs. Zero items out (gate off, or no networks linked) = the posting node\n// simply doesn't fire, and the run stays green.\nconst cfg = $('Show config').first().json;\nif (!cfg.postToSocial) return [];\nconst resp = $('Fetch campaign links').first().json || {};\nif (!Array.isArray(resp.campaignLinks)) throw new Error('could not list campaign links for social posting (' + (resp.error?.message || 'no campaignLinks in response') + ') — check the \"YakYak API\" credential has the social_publishing scope, or set Show config postToSocial=false');\nconst movieId = $('Call engine').first().json.movieId;\nreturn resp.campaignLinks.filter((r) => r.connectedNetworkId).map((r) => ({ json: { movieId, connectedNetworkId: r.connectedNetworkId, socialNetworkName: r.socialNetworkName || '' } }));"
+      },
+      "notes": "One item per linked network. Linking networks to the campaign is a one-time manual step (yakyak.ai profile, or course/08-social-post) — with none linked, this emits zero items and the run still succeeds."
+    },
+    {
+      "id": "postToSocials",
+      "name": "Post to socials",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3000,
+        300
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Show config').first().json.apiBase }}/social/post-movie/{{ $json.movieId }}/{{ $json.connectedNetworkId }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "credentials": {
+        "httpBearerAuth": {
+          "name": "YakYak API"
+        }
+      },
+      "notes": "POST /social/post-movie/{movieId}/{connectedNetworkId}, empty body — runs once per item, i.e. once per linked network. IRREVERSIBLE. onError=continue mirrors the showrunner: a per-network 4xx (mis-configured account etc.) must not fail the other networks or the run. Needs the social_publishing scope on the PAT."
     },
     {
       "parameters": {
@@ -458,6 +531,39 @@
         [
           {
             "node": "Announce",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Announce": {
+      "main": [
+        [
+          {
+            "node": "Fetch campaign links",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch campaign links": {
+      "main": [
+        [
+          {
+            "node": "Build post list",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build post list": {
+      "main": [
+        [
+          {
+            "node": "Post to socials",
             "type": "main",
             "index": 0
           }
