@@ -9,6 +9,22 @@
   },
   "nodes": [
     {
+      "id": "yakyakDescription",
+      "name": "YakYak Description",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        -176
+      ],
+      "parameters": {
+        "content": "## 📄 YakYak Description — workflow summary (not a step note)\nEvery day at UTC 06:00 the Middle Eastern news from CNN, BBC and Al Jazeera are fetched. The articles are weaved into a plot and rendered by LEGO characters.",
+        "height": 200,
+        "width": 3200,
+        "color": 4
+      }
+    },
+    {
       "id": "schedule",
       "name": "Every morning",
       "type": "n8n-nodes-base.scheduleTrigger",

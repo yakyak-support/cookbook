@@ -9,6 +9,22 @@
   },
   "nodes": [
     {
+      "id": "yakyakDescription",
+      "name": "YakYak Description",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "content": "## 📄 YakYak Description — workflow summary (not a step note)\nEvery day at UTC 21:00 real Bitcoin, Ethereum and Doge prices along with market sentiment are fetched. The numbers are woven into a dark-comedy newscast and rendered in anime style.",
+        "height": 200,
+        "width": 3200,
+        "color": 4
+      }
+    },
+    {
       "id": "schedule",
       "name": "Every evening",
       "type": "n8n-nodes-base.scheduleTrigger",

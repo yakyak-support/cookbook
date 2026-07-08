@@ -9,6 +9,22 @@
   },
   "nodes": [
     {
+      "id": "yakyakDescription",
+      "name": "YakYak Description",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "content": "## 📄 YakYak Description — workflow summary (not a step note)\nEvery Monday, Wednesday and Friday at UTC 06:00 the next verbatim maxim from The Art of War is selected. The maxim is dramatized as a modern micro-drama and rendered as an oil painting.",
+        "height": 200,
+        "width": 2800,
+        "color": 4
+      }
+    },
+    {
       "id": "schedule",
       "name": "Mon Wed Fri",
       "type": "n8n-nodes-base.scheduleTrigger",

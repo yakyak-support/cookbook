@@ -9,6 +9,22 @@
   },
   "nodes": [
     {
+      "id": "yakyakDescription",
+      "name": "YakYak Description",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "content": "## 📄 YakYak Description — workflow summary (not a step note)\nEvery Sunday at UTC 06:00 a reading is computed for each of the twelve zodiac signs from the calendar week. The forecasts are dramatized and rendered as a celestial digital painting.",
+        "height": 200,
+        "width": 2000,
+        "color": 4
+      }
+    },
+    {
       "id": "schedule",
       "name": "Every Sunday",
       "type": "n8n-nodes-base.scheduleTrigger",

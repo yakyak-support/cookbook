@@ -53,6 +53,16 @@ change + render from any external event.
 Prefer no n8n at all? The standalone render-and-deliver-to-Telegram script lives in
 [`../telegram/`](../telegram/) — same YakYak calls, zero dependencies.
 
+### Workflow descriptions live in a sticky note, not the Description dialog
+
+n8n's canvas "Description" dialog (double-click the workflow title, or the ⋯ menu) writes
+to a DB-only field — it's absent from the exported/imported workflow JSON entirely, so it
+never round-trips through git or a fresh import. Every workflow in this folder instead
+carries a **`YakYak Description`** sticky note (`n8n-nodes-base.stickyNote`) as the first
+node, positioned as a banner above the main canvas row. It's a real node, so it survives
+export/import/git like any other step. Keep the name exactly `YakYak Description` so it
+stays unambiguous against any other sticky notes added later for step-level annotations.
+
 ## Start here
 
 1. **📖 [`docs/yakyak_engine.md`](./docs/yakyak_engine.md)** — the engine from zero:

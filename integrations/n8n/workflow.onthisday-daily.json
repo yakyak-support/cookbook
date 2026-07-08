@@ -9,6 +9,22 @@
   },
   "nodes": [
     {
+      "id": "yakyakDescription",
+      "name": "YakYak Description",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {
+        "content": "## 📄 YakYak Description — workflow summary (not a step note)\nEvery day at UTC 06:00 a real historical anniversary matching the date is drawn from a public-domain corpus. The event is dramatized as a reenactment and rendered in a sepia documentary style.",
+        "height": 200,
+        "width": 2600,
+        "color": 4
+      }
+    },
+    {
       "id": "schedule",
       "name": "Every morning",
       "type": "n8n-nodes-base.scheduleTrigger",

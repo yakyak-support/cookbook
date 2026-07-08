@@ -9,6 +9,22 @@
   },
   "nodes": [
     {
+      "id": "yakyakDescription",
+      "name": "YakYak Description",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        -240
+      ],
+      "parameters": {
+        "content": "## 📄 YakYak Description — workflow summary (not a step note)\nGiven a change request, the target campaign or movie is resolved by name, then patched in place or minted as a new episode and rendered. The finished video URL is returned to the caller.",
+        "height": 200,
+        "width": 7240,
+        "color": 4
+      }
+    },
+    {
       "id": "trigger",
       "name": "Input event",
       "type": "n8n-nodes-base.webhook",

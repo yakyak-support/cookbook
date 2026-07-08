@@ -9,6 +9,22 @@
   },
   "nodes": [
     {
+      "id": "yakyakDescription",
+      "name": "YakYak Description",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        -260
+      ],
+      "parameters": {
+        "content": "## 📄 YakYak Description — workflow summary (not a step note)\nOn request, one line of dialogue is changed and the scene is re-rendered, or the existing render is simply reused. The finished video is delivered to Telegram, Discord and Slack.",
+        "height": 200,
+        "width": 2440,
+        "color": 4
+      }
+    },
+    {
       "id": "trigger",
       "name": "Patch request",
       "type": "n8n-nodes-base.webhook",

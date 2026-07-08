@@ -9,6 +9,22 @@
   },
   "nodes": [
     {
+      "id": "yakyakDescription",
+      "name": "YakYak Description",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        -280
+      ],
+      "parameters": {
+        "content": "## 📄 YakYak Description — workflow summary (not a step note)\nEvery day at UTC 06:00 three tarot cards are drawn in a seeded past, present and future spread. The reading is dramatized and rendered as a candle-lit art-nouveau scene.",
+        "height": 200,
+        "width": 2800,
+        "color": 4
+      }
+    },
+    {
       "id": "schedule",
       "name": "Every morning",
       "type": "n8n-nodes-base.scheduleTrigger",
