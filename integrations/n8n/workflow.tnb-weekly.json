@@ -1,0 +1,694 @@
+{
+  "name": "The Neural Bricklayers — weekly episode (front-end for the YakYak engine)",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "executionTimeout": 3600
+  },
+  "nodes": [
+    {
+      "id": "yakyakDescription",
+      "name": "YakYak Description",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        -176
+      ],
+      "parameters": {
+        "content": "## 📄 YakYak Description — workflow summary (not a step note)\nEvery Wednesday at UTC 06:00 the past week's X/Twitter posts from five AI titans (Sam Altman, Yann LeCun, Geoffrey Hinton, Andrej Karpathy, Elon Musk) are fetched, clustered into the single most controversial theme, and turned into a LEGO panel-debate episode moderated by Bob Brikko.",
+        "height": 200,
+        "width": 3200,
+        "color": 4
+      }
+    },
+    {
+      "id": "showConfig",
+      "name": "Show config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        200,
+        300
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "cfg-campaign",
+              "name": "campaignId",
+              "value": "",
+              "type": "string"
+            },
+            {
+              "id": "cfg-user",
+              "name": "userId",
+              "value": "",
+              "type": "string"
+            },
+            {
+              "id": "cfg-min",
+              "name": "minTokenBalance",
+              "value": 2000,
+              "type": "number"
+            },
+            {
+              "id": "cfg-base",
+              "name": "apiBase",
+              "value": "https://api.yakyak.ai",
+              "type": "string"
+            },
+            {
+              "id": "cfg-track",
+              "name": "soundtrackAudioPath",
+              "value": "",
+              "type": "string"
+            },
+            {
+              "id": "cfg-vol",
+              "name": "soundtrackVolume",
+              "value": 45,
+              "type": "number"
+            },
+            {
+              "id": "cfg-chat",
+              "name": "chatWebhookUrl",
+              "value": "",
+              "type": "string"
+            },
+            {
+              "id": "cfg-post",
+              "name": "postToSocial",
+              "value": true,
+              "type": "boolean"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "notes": "ALL per-show config lives here, on the canvas — the workflow reads no environment variables. Required: campaignId (a campaign the API credential's account owns) and userId (for the balance check). Optional: soundtrackAudioPath (prefilled with the BBN intro track's content address — the beta/ prefix is normal, see docs/forking.md; empty = skip the pin), chatWebhookUrl (empty = no announcement). postToSocial=true is POST=\"true\" parity — every run publishes to the campaign's linked networks (irreversible); set false for review-first runs."
+    },
+    {
+      "id": "fetchUser",
+      "name": "Fetch user",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        400,
+        300
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.apiBase }}/users/{{ $json.userId }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "credentials": {
+        "httpBearerAuth": {
+          "name": "YakYak API"
+        }
+      },
+      "notes": "Same 'YakYak API' Bearer credential as the engine — no token on the canvas or in env. onError=continue so Balance guard can report a clear error instead of a bare 404."
+    },
+    {
+      "id": "balanceGuard",
+      "name": "Balance guard",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        600,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Abort BEFORE burning a partial episode — an episode generates ~10 scenes (💸).\n// Mirrors MIN_TOKEN_BALANCE=2000 in show/BreakingBricksNews/show.env.\n// Doubles as the config preflight, so an unfilled Show config fails here in\n// seconds — not after the story call.\nconst cfg = $('Show config').first().json;\nif (!cfg.campaignId) throw new Error('Show config: campaignId is empty — set it to a campaign id the API credential\\'s account owns');\nif (!cfg.userId) throw new Error('Show config: userId is empty — set it to the YakYak user id the API credential belongs to');\nconst user = $json;\nif (user.tokenBalance === undefined) throw new Error('could not fetch the user record — check Show config userId and the \"YakYak API\" credential (' + (user.error?.message || 'no tokenBalance in response') + ')');\nconst balance = Number(user.tokenBalance || 0);\nconst min = Number(cfg.minTokenBalance || 2000);\nif (balance < min) throw new Error(`token balance ${balance} is below the ${min} minimum — top up before generating an episode`);\nreturn [{ json: { balance } }];"
+      }
+    },
+    {
+      "id": "buildPrompt",
+      "name": "Build prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1800,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// The Neural Bricklayers head-writer prompt, adapted from the BBN pattern\n// (docs/the_neural_bricklayers.md in the yakyak repo). Sources are X/Twitter\n// timelines via nitter RSS (+ Google News for Hinton, who barely posts).\n// Per-account lookbacks (Musk 3d, others 5d, Hinton 14d) are enforced by the\n// prompt against each item's <pubDate>. One overarching theme per episode;\n// 12 scenes; fixed studio; fixed outfits; co-panelists visible in every shot.\nconst trim = (s) => String(s || '').slice(0, 15000);\nconst src = (label, s) => s ? `--- ${label} ---\\n${s}` : `--- ${label} ---\\n(source unavailable this run — proceed without it)`;\nconst musk = trim(($('Fetch Musk (X)').first().json || {}).data);\nconst altman = trim(($('Fetch Altman (X)').first().json || {}).data);\nconst lecun = trim(($('Fetch LeCun (X)').first().json || {}).data);\nconst karpathy = trim(($('Fetch Karpathy (X)').first().json || {}).data);\nconst hinton = trim(($('Fetch Hinton (news)').first().json || {}).data);\nconst got = [musk, altman, lecun, karpathy, hinton].filter(Boolean).length;\nif (got < 2) throw new Error(`only ${got}/5 sources fetched — not enough material for a debate (nitter may be rate-limiting; retry later)`);\nconst ts = new Date().toISOString();\n\nconst prompt = `You are the head writer for \"The Neural Bricklayers\", a satirical\nshort-form panel-debate show: the five most influential voices in AI, rendered as\nLEGO-style plastic minifigure caricatures, argue on a late-night TV set. The\ndebates are PARODY, but every episode is seeded from things the panelists\nreally posted this week. Your job in this run is to produce ONE episode.\n\nSTEP 1 — Read the source material below (RSS mirrors of each panelist's real\nX/Twitter timeline, plus a news feed for Hinton). Each <item> has a <pubDate>.\nApply these lookback windows from now (now: ${ts}):\n  - Elon Musk: past 3 days only (he posts constantly; older items are stale).\n  - Sam Altman, Yann LeCun, Andrej Karpathy: past 5 days.\n  - Geoffrey Hinton (news feed): past 14 days.\nIgnore items outside the window. Retweets (\"RT by @…\") count as endorsements —\nusable, but prefer the panelist's own words. If a source is marked unavailable,\nnote it and give that panelist positions consistent with their well-known views.\n\nSTEP 2 — Find THE CLASH. Cluster the posts by topic and pick the ONE theme with\nthe most heat — the sharpest real disagreement between at least three panelists.\nThat single theme is the episode's spine: every scene must advance it. Pick the\nmost exciting, most controversial defensible reading of what they posted; real\nfriction between the actual posts beats invented drama.\n\nSTEP 3 — Write the episode.\n\nTHE STUDIO (identical in every scene — restate it, do not vary it):\nThe Neural Bricklayers studio — a late-night debate set built entirely from toy\nplastic bricks: one long curved glossy black brick desk, six brick microphones,\npurple-and-teal rim lighting, a glowing brick LED backdrop reading \"THE NEURAL\nBRICKLAYERS\", and a brick city-skyline window behind the desk. Fixed seating,\nleft to right: Sam Altman, Yann LeCun, Bob Brikko (center, moderator), Geoffrey\nHinton, Andrej Karpathy, Elon Musk. Same studio, same seats, all 12 scenes.\n\nCAST — fixed outfits (repeat the outfit EVERY time a character appears; never\nchange or omit it):\n  - Bob Brikko (moderator) — rumpled tan trench coat over a white shirt, crooked\n    press badge. Tongue-in-cheek, dry, deadpan under fire.\n  - Sam Altman — plain gray crewneck sweater under an open dark-blue jacket.\n    The Operator: smooth, always announcing, deflects doom with scale.\n  - Yann LeCun — brown tweed blazer, light-blue shirt, thick black rectangular\n    glasses. The Contrarian Scientist: unimpressed, fights billionaires for sport.\n  - Geoffrey Hinton — charcoal suit, slate-gray shirt, autumn-leaf patterned tie,\n    white hair. The Conscience: gentle, wry, quietly terrifying.\n  - Andrej Karpathy — plain dark-charcoal t-shirt, silver laptop under one arm.\n    The Builder: earnest, permanently amazed, the only one who still writes code.\n  - Elon Musk — black tuxedo-style jacket over an open-collar white shirt,\n    tousled hair, smirk. The Accelerant: announces, provokes and memes in one breath.\n\nEPISODE STRUCTURE — exactly 12 scenes. Bob opens and closes; every panelist\nleads EXACTLY TWO scenes:\n  - Scene 1 — Bob Brikko: cold open, names the week's clash.\n  - Scenes 2–6 — first round: each panelist's opening take (one scene each, any\n    order that serves the drama).\n  - Scenes 7–11 — second round: rebuttals and escalation — pair natural enemies\n    back-to-back and let them answer each other (one scene each, any order).\n  - Scene 12 — Bob Brikko: deadpan sign-off that lands the theme.\n\nPER-SCENE REQUIREMENTS:\n  - Roughly 200 words of prose describing the scene's visuals, action and\n    atmosphere, written as a director briefing a camera op. EVERY scene's prose\n    must: (a) open by re-establishing the same studio described above, (b) put\n    the leading character front and center at their fixed seat with their exact\n    fixed outfit, and (c) show AT LEAST TWO other named cast members visibly\n    reacting in the frame (soft focus, at their own fixed seats, in their own\n    fixed outfits — name them and describe their reaction).\n  - Exactly ONE spoken dialog line per scene, 8–12 words, attributed to the\n    scene's leading character. Do NOT end the dialog line with a period\n    (\"!\" or \"?\" are fine).\n  - Leading character must be from the cast. No other characters speak.\n\nTONE: Satirical panel-show comedy with real bite. The heat comes from the\npanelists' REAL public positions pushed to their logical extreme; exaggerate\ndelivery, not facts. No slapstick, no slurs, no fabricated scandals. Punch up,\nnot down.\n\nSTEP 4 — Reply with ONLY the markdown document below — no preamble, no\ntriple-backtick fences, nothing after it:\n\n  # The Neural Bricklayers — Latest Debate\n  **Generated (UTC):** ${ts}\n  **Sources:** X/Twitter timelines (@elonmusk 3d, @sama/@ylecun/@karpathy 5d), Hinton news (14d)\n\n  ## Social title: <punchy controversial title for social posting, 50 characters MAX>\n\n  ## Theme: <one sentence naming the episode's single overarching clash>\n\n  ## Posts we drew from:\n  - <one bullet per real post/report you used: who, what, when>\n\n  ## Scene 1 — <short title>\n  **Leading character:** Bob Brikko\n  **Dialog:** \"<8–12 word line>\"\n\n  <~200 words of scene prose>\n\n  ... (continue through Scene 12, which is again Bob Brikko) ...\n\n===== SOURCE MATERIAL =====\n\n${src('@elonmusk (nitter RSS)', musk)}\n\n${src('@sama (nitter RSS)', altman)}\n\n${src('@ylecun (nitter RSS)', lecun)}\n\n${src('@karpathy (nitter RSS)', karpathy)}\n\n${src('Geoffrey Hinton (Google News RSS)', hinton)}`;\n\nreturn [{ json: { prompt } }];"
+      }
+    },
+    {
+      "id": "writeStory",
+      "name": "Write story (Claude)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2000,
+        300
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { model: 'claude-opus-4-8', max_tokens: 16000, thinking: { type: 'adaptive' }, messages: [ { role: 'user', content: $json.prompt } ] } }}",
+        "options": {
+          "timeout": 600000
+        },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth"
+      },
+      "notes": "Messages API over raw HTTP (no SDK inside n8n). Auth via the 'Anthropic API key' Header Auth credential (header name x-api-key). Adaptive thinking; the story lands in the response's text block.",
+      "credentials": {
+        "httpHeaderAuth": {
+          "name": "Anthropic API key"
+        }
+      }
+    },
+    {
+      "id": "storyPayload",
+      "name": "Build story payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2200,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Extract the story markdown from the Claude response, then port of\n// storyToDescription() from show/showrunner/story-format.js: drop everything\n// before the first '## Scene', collapse each scene's prose to one line, append\n// `<Char> says: \"<dialog>\"`, mapping names through the cast map (CAST_ALIASES\n// in show.env — both Mojtaba and Khamenei collapse to the Mojtaba character).\nconst resp = $json;\nif (resp.stop_reason === 'refusal') throw new Error('Claude declined the request (stop_reason: refusal)');\nconst story = (resp.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\\n');\nif (!/## Scene/.test(story)) throw new Error('Claude response contains no \"## Scene\" blocks — not a story');\n\n// ≤50-char social title from the requested '## Social title:' line\nlet socialTitle = '';\nconst mTitle = story.match(/^##\\s*Social title:\\s*(.+)$/mi);\nif (mTitle) socialTitle = [...mTitle[1].trim().replace(/^\"|\"$/g, '')].slice(0, 50).join('');\n\n// caption from the theme line + posts bullets\nconst capLines = [];\nconst tm = story.match(/^##\\s*Theme:\\s*(.+)$/mi);\nif (tm) capLines.push(tm[1].trim());\nconst hm = story.match(/## Posts we drew from:\\n([\\s\\S]*?)\\n##/);\nif (hm) for (const l of hm[1].split('\\n')) { const t = l.replace(/^-\\s*/, '').trim(); if (t) capLines.push(t); }\nconst socialCaption = capLines.slice(0, 6).join(' · ').slice(0, 400);\n\nconst ALIASES = { Bob: 'Bob Brikko', Brikko: 'Bob Brikko', Altman: 'Sam Altman', LeCun: 'Yann LeCun', Hinton: 'Geoffrey Hinton', Karpathy: 'Andrej Karpathy', Musk: 'Elon Musk' };\nconst mapShort = (name) => { for (const k of Object.keys(ALIASES)) if (name.includes(k)) return ALIASES[k]; return String(name).trim(); };\n\nconst lines = story.split(/\\r?\\n/);\nlet inScene = false, n = 0, prose = '', character = '', dialog = '';\nconst parts = [];\nconst emit = () => {\n  if (!inScene) return;\n  const p = prose.replace(/[ \\t]+/g, ' ').trim();\n  const s = mapShort(character);\n  parts.push(n === 0 ? `- ${p} ${s} says: \"${dialog}\"` : `\\n\\n  - ${p} ${s} says: \"${dialog}\"`);\n  n++;\n};\nfor (const line of lines) {\n  if (/^## Scene/.test(line)) { emit(); inScene = true; prose = ''; character = ''; dialog = ''; continue; }\n  if (!inScene) continue;\n  if (/^\\*\\*Leading character:\\*\\*/.test(line)) { character = line.replace(/^\\*\\*Leading character:\\*\\*[ \\t]*/, ''); continue; }\n  if (/^\\*\\*Dialog:\\*\\*/.test(line)) { dialog = line.replace(/^\\*\\*Dialog:\\*\\*[ \\t]*/, '').trim().replace(/^\"|\"$/g, '').replace(/\\.$/, ''); continue; }\n  if (/^##/.test(line)) { emit(); inScene = false; continue; }\n  prose += ' ' + line;\n}\nemit();\nif (!parts.length) throw new Error('no scenes parsed from the story');\nif (n !== 12) console.warn(`expected 12 scenes (Bob x2 + five panelists x2), parsed ${n} — proceeding`);\nconst plot = parts.join('');\nreturn [{ json: { plot, socialTitle, socialCaption, scenes: n, story } }];"
+      },
+      "notes": "The story markdown is preserved on this node's output — n8n's execution log is the story archive (the showrunner's stories/ equivalent)."
+    },
+    {
+      "id": "callEngine",
+      "name": "Call engine",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        2400,
+        300
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000,
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "",
+          "cachedResultName": "YakYak engine — resolve target, patch or new episode, render, post"
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "notes": "Fires the generic YakYak engine in episode mode. Timeout 45 min — the engine only responds once the episode is generated AND rendered. Retry is safe: a re-run lands on the same unrendered slot. Announcement happens here (below), not in the engine."
+    },
+    {
+      "id": "setSocial",
+      "name": "Set social fields",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2600,
+        300
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Show config').first().json.apiBase }}/workflow/update-movie-social-description",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ Object.assign({ movieId: $json.movieId }, $('Build story payload').first().json.socialTitle ? { socialTitle: $('Build story payload').first().json.socialTitle } : {}, $('Build story payload').first().json.socialCaption ? { socialDescription: $('Build story payload').first().json.socialCaption } : {}) }}",
+        "options": {},
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth"
+      },
+      "notes": "Showrunner parity: ≤50-char social title (from the story call) + headline-derived caption. onError=continue — cosmetic metadata must not kill a rendered episode.",
+      "credentials": {
+        "httpBearerAuth": {
+          "name": "YakYak API"
+        }
+      }
+    },
+    {
+      "id": "announce",
+      "name": "Announce",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2800,
+        300
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Show config').first().json.chatWebhookUrl }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { text: '🧱 The Neural Bricklayers episode ready — \"' + ($('Build story payload').first().json.socialTitle || 'Latest Debate') + '\": ' + $('Call engine').item.json.url } }}",
+        "options": {}
+      },
+      "notes": "Chat notification with the episode link. chatWebhookUrl empty → this node errors and the run still succeeds (onError=continue). Social posting happens in the three nodes after this one, gated by Show config postToSocial — see integrations/n8n/docs/breaking_bricks_news.md §4.3."
+    },
+    {
+      "id": "fetchLinks",
+      "name": "Fetch campaign links",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3000,
+        300
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('Show config').first().json.apiBase }}/social/campaign-links/{{ $('Show config').first().json.campaignId }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "credentials": {
+        "httpBearerAuth": {
+          "name": "YakYak API"
+        }
+      },
+      "notes": "The campaign's linked social networks — GET /social/campaign-links, same call the showrunner makes before posting. Read-only, so it runs regardless; the postToSocial gate is applied in Build post list. onError=continue so Build post list can report a clear error."
+    },
+    {
+      "id": "buildPostList",
+      "name": "Build post list",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3200,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// POST=\"true\" parity: BBN is the cookbook's auto-posting show, so the daily\n// run publishes to every network linked to the campaign — the same fan-out as\n// the showrunner's post step (one /social/post-movie call per campaign link).\n// The gate lives in Show config (postToSocial); set it false for review-first\n// runs. Zero items out (gate off, or no networks linked) = the posting node\n// simply doesn't fire, and the run stays green.\nconst cfg = $('Show config').first().json;\nif (!cfg.postToSocial) return [];\nconst resp = $('Fetch campaign links').first().json || {};\nif (!Array.isArray(resp.campaignLinks)) throw new Error('could not list campaign links for social posting (' + (resp.error?.message || 'no campaignLinks in response') + ') — check the \"YakYak API\" credential has the social_publishing scope, or set Show config postToSocial=false');\nconst movieId = $('Call engine').first().json.movieId;\nreturn resp.campaignLinks.filter((r) => r.connectedNetworkId).map((r) => ({ json: { movieId, connectedNetworkId: r.connectedNetworkId, socialNetworkName: r.socialNetworkName || '' } }));"
+      },
+      "notes": "One item per linked network. Linking networks to the campaign is a one-time manual step (yakyak.ai profile, or course/08-social-post) — with none linked, this emits zero items and the run still succeeds."
+    },
+    {
+      "id": "postToSocials",
+      "name": "Post to socials",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3400,
+        300
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Show config').first().json.apiBase }}/social/post-movie/{{ $json.movieId }}/{{ $json.connectedNetworkId }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "credentials": {
+        "httpBearerAuth": {
+          "name": "YakYak API"
+        }
+      },
+      "notes": "POST /social/post-movie/{movieId}/{connectedNetworkId}, empty body — runs once per item, i.e. once per linked network. IRREVERSIBLE. onError=continue mirrors the showrunner: a per-network 4xx (mis-configured account etc.) must not fail the other networks or the run. Needs the social_publishing scope on the PAT."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Shape the engine call: episode mode in the pinned BBN campaign, the story\n// as the new episode's plot, optional soundtrack pin. The engine's sub-workflow\n// trigger is passthrough — this item IS the payload (same shape as the engine\n// webhook's body). Re-delivered same-day stories are diff-aware on the engine\n// side, so a duplicate run doesn't re-bill unchanged work.\nconst cfg = $('Show config').first().json;\nif (!cfg.campaignId) throw new Error('Show config: campaignId is empty');\nconst movie = { plot: $json.plot };\nif (cfg.soundtrackAudioPath) {\n  movie.soundtrackAudioPath = cfg.soundtrackAudioPath;\n  if (cfg.soundtrackVolume) movie.soundtrackVolume = Number(cfg.soundtrackVolume);\n}\nreturn [{ json: { target: { mode: 'episode', campaignId: cfg.campaignId }, changes: { movie }, chatWebhookUrl: '' } }];"
+      },
+      "id": "885fe683-c0d1-4e09-b946-c9239593ea10",
+      "name": "Build engine payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2300,
+        124
+      ]
+    },
+    {
+      "id": "schedule",
+      "name": "Every Wednesday",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        300
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 6 * * 3"
+            }
+          ]
+        }
+      },
+      "notes": "06:00 UTC daily — CADENCE=daily in show/BreakingBricksNews/show.env. Use 'Test workflow' to fire a run by hand."
+    },
+    {
+      "id": "fetchBbc",
+      "name": "Fetch Musk (X)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        800,
+        300
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "GET",
+        "url": "https://nitter.net/elonmusk/rss",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "notes": "Nitter RSS mirror of @elonmusk. 3-day lookback is applied in Build prompt."
+    },
+    {
+      "id": "fetchCnn",
+      "name": "Fetch Altman (X)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1000,
+        300
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "GET",
+        "url": "https://nitter.net/sama/rss",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "notes": "Nitter RSS mirror of @sama. 5-day lookback is applied in Build prompt."
+    },
+    {
+      "id": "fetchAj",
+      "name": "Fetch LeCun (X)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1200,
+        300
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "GET",
+        "url": "https://nitter.net/ylecun/rss",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "notes": "Nitter RSS mirror of @ylecun. 5-day lookback is applied in Build prompt."
+    },
+    {
+      "id": "fetch-karpathy-x",
+      "name": "Fetch Karpathy (X)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1400,
+        300
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "GET",
+        "url": "https://nitter.net/karpathy/rss",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "notes": "Nitter RSS mirror of @karpathy. 5-day lookback is applied in Build prompt."
+    },
+    {
+      "id": "fetch-hinton-news",
+      "name": "Fetch Hinton (news)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1600,
+        300
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "GET",
+        "url": "https://news.google.com/rss/search?q=%22Geoffrey%20Hinton%22%20AI%20when%3A14d&hl=en-US&gl=US&ceid=US:en",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "notes": "Hinton barely posts on X — Google News RSS (14-day window) covers his interviews/talks instead."
+    }
+  ],
+  "connections": {
+    "Balance guard": {
+      "main": [
+        [
+          {
+            "node": "Fetch Musk (X)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build prompt": {
+      "main": [
+        [
+          {
+            "node": "Write story (Claude)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write story (Claude)": {
+      "main": [
+        [
+          {
+            "node": "Build story payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build story payload": {
+      "main": [
+        [
+          {
+            "node": "Build engine payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call engine": {
+      "main": [
+        [
+          {
+            "node": "Set social fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set social fields": {
+      "main": [
+        [
+          {
+            "node": "Announce",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Announce": {
+      "main": [
+        [
+          {
+            "node": "Fetch campaign links",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch campaign links": {
+      "main": [
+        [
+          {
+            "node": "Build post list",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build post list": {
+      "main": [
+        [
+          {
+            "node": "Post to socials",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build engine payload": {
+      "main": [
+        [
+          {
+            "node": "Call engine",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Show config": {
+      "main": [
+        [
+          {
+            "node": "Fetch user",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch user": {
+      "main": [
+        [
+          {
+            "node": "Balance guard",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Every Wednesday": {
+      "main": [
+        [
+          {
+            "node": "Show config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Musk (X)": {
+      "main": [
+        [
+          {
+            "node": "Fetch Altman (X)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Altman (X)": {
+      "main": [
+        [
+          {
+            "node": "Fetch LeCun (X)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch LeCun (X)": {
+      "main": [
+        [
+          {
+            "node": "Fetch Karpathy (X)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Karpathy (X)": {
+      "main": [
+        [
+          {
+            "node": "Fetch Hinton (news)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Hinton (news)": {
+      "main": [
+        [
+          {
+            "node": "Build prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}
