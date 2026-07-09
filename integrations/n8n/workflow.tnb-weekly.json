@@ -141,7 +141,7 @@
       ],
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "// The Neural Bricklayers head-writer prompt, adapted from the BBN pattern\n// (docs/the_neural_bricklayers.md in the yakyak repo). Sources are X/Twitter\n// timelines via nitter RSS (+ Google News for Hinton, who barely posts).\n// Per-account lookbacks (Musk 3d, others 5d, Hinton 14d) are enforced by the\n// prompt against each item's <pubDate>. One overarching theme per episode;\n// 12 scenes; fixed studio; fixed outfits; co-panelists visible in every shot.\nconst trim = (s) => String(s || '').slice(0, 15000);\nconst src = (label, s) => s ? `--- ${label} ---\\n${s}` : `--- ${label} ---\\n(source unavailable this run — proceed without it)`;\nconst musk = trim(($('Fetch Musk (X)').first().json || {}).data);\nconst altman = trim(($('Fetch Altman (X)').first().json || {}).data);\nconst lecun = trim(($('Fetch LeCun (X)').first().json || {}).data);\nconst karpathy = trim(($('Fetch Karpathy (X)').first().json || {}).data);\nconst hinton = trim(($('Fetch Hinton (news)').first().json || {}).data);\nconst got = [musk, altman, lecun, karpathy, hinton].filter(Boolean).length;\nif (got < 2) throw new Error(`only ${got}/5 sources fetched — not enough material for a debate (nitter may be rate-limiting; retry later)`);\nconst ts = new Date().toISOString();\n\nconst prompt = `You are the head writer for \"The Neural Bricklayers\", a satirical\nshort-form panel-debate show: the five most influential voices in AI, rendered as\nLEGO-style plastic minifigure caricatures, argue on a late-night TV set. The\ndebates are PARODY, but every episode is seeded from things the panelists\nreally posted this week. Your job in this run is to produce ONE episode.\n\nSTEP 1 — Read the source material below (RSS mirrors of each panelist's real\nX/Twitter timeline, plus a news feed for Hinton). Each <item> has a <pubDate>.\nApply these lookback windows from now (now: ${ts}):\n  - Elon Musk: past 3 days only (he posts constantly; older items are stale).\n  - Sam Altman, Yann LeCun, Andrej Karpathy: past 5 days.\n  - Geoffrey Hinton (news feed): past 14 days.\nIgnore items outside the window. Retweets (\"RT by @…\") count as endorsements —\nusable, but prefer the panelist's own words. If a source is marked unavailable,\nnote it and give that panelist positions consistent with their well-known views.\n\nSTEP 2 — Find THE CLASH. Cluster the posts by topic and pick the ONE theme with\nthe most heat — the sharpest real disagreement between at least three panelists.\nThat single theme is the episode's spine: every scene must advance it. Pick the\nmost exciting, most controversial defensible reading of what they posted; real\nfriction between the actual posts beats invented drama.\n\nSTEP 3 — Write the episode.\n\nTHE STUDIO (identical in every scene — restate it, do not vary it):\nThe Neural Bricklayers studio — a late-night debate set built entirely from toy\nplastic bricks: one long curved glossy black brick desk, six brick microphones,\npurple-and-teal rim lighting, a glowing brick LED backdrop reading \"THE NEURAL\nBRICKLAYERS\", and a brick city-skyline window behind the desk. Fixed seating,\nleft to right: Sam Altman, Yann LeCun, Bob Brikko (center, moderator), Geoffrey\nHinton, Andrej Karpathy, Elon Musk. Same studio, same seats, all 12 scenes.\n\nCAST — fixed outfits (repeat the outfit EVERY time a character appears; never\nchange or omit it):\n  - Bob Brikko (moderator) — rumpled tan trench coat over a white shirt, crooked\n    press badge. Tongue-in-cheek, dry, deadpan under fire.\n  - Sam Altman — plain gray crewneck sweater under an open dark-blue jacket.\n    The Operator: smooth, always announcing, deflects doom with scale.\n  - Yann LeCun — brown tweed blazer, light-blue shirt, thick black rectangular\n    glasses. The Contrarian Scientist: unimpressed, fights billionaires for sport.\n  - Geoffrey Hinton — charcoal suit, slate-gray shirt, autumn-leaf patterned tie,\n    white hair. The Conscience: gentle, wry, quietly terrifying.\n  - Andrej Karpathy — plain dark-charcoal t-shirt, silver laptop under one arm.\n    The Builder: earnest, permanently amazed, the only one who still writes code.\n  - Elon Musk — black tuxedo-style jacket over an open-collar white shirt,\n    tousled hair, smirk. The Accelerant: announces, provokes and memes in one breath.\n\nEPISODE STRUCTURE — exactly 12 scenes. Bob opens and closes; every panelist\nleads EXACTLY TWO scenes:\n  - Scene 1 — Bob Brikko: cold open, names the week's clash.\n  - Scenes 2–6 — first round: each panelist's opening take (one scene each, any\n    order that serves the drama).\n  - Scenes 7–11 — second round: rebuttals and escalation — pair natural enemies\n    back-to-back and let them answer each other (one scene each, any order).\n  - Scene 12 — Bob Brikko: deadpan sign-off that lands the theme.\n\nPER-SCENE REQUIREMENTS:\n  - Roughly 200 words of prose describing the scene's visuals, action and\n    atmosphere, written as a director briefing a camera op. EVERY scene's prose\n    must: (a) open by re-establishing the same studio described above, (b) put\n    the leading character front and center at their fixed seat with their exact\n    fixed outfit, and (c) show AT LEAST TWO other named cast members visibly\n    reacting in the frame (soft focus, at their own fixed seats, in their own\n    fixed outfits — name them and describe their reaction).\n  - Exactly ONE spoken dialog line per scene, 8–12 words, attributed to the\n    scene's leading character. Do NOT end the dialog line with a period\n    (\"!\" or \"?\" are fine).\n  - Leading character must be from the cast. No other characters speak.\n\nTONE: Satirical panel-show comedy with real bite. The heat comes from the\npanelists' REAL public positions pushed to their logical extreme; exaggerate\ndelivery, not facts. No slapstick, no slurs, no fabricated scandals. Punch up,\nnot down.\n\nSTEP 4 — Reply with ONLY the markdown document below — no preamble, no\ntriple-backtick fences, nothing after it:\n\n  # The Neural Bricklayers — Latest Debate\n  **Generated (UTC):** ${ts}\n  **Sources:** X/Twitter timelines (@elonmusk 3d, @sama/@ylecun/@karpathy 5d), Hinton news (14d)\n\n  ## Social title: <punchy controversial title for social posting, 50 characters MAX>\n\n  ## Theme: <one sentence naming the episode's single overarching clash>\n\n  ## Posts we drew from:\n  - <one bullet per real post/report you used: who, what, when>\n\n  ## Scene 1 — <short title>\n  **Leading character:** Bob Brikko\n  **Dialog:** \"<8–12 word line>\"\n\n  <~200 words of scene prose>\n\n  ... (continue through Scene 12, which is again Bob Brikko) ...\n\n===== SOURCE MATERIAL =====\n\n${src('@elonmusk (nitter RSS)', musk)}\n\n${src('@sama (nitter RSS)', altman)}\n\n${src('@ylecun (nitter RSS)', lecun)}\n\n${src('@karpathy (nitter RSS)', karpathy)}\n\n${src('Geoffrey Hinton (Google News RSS)', hinton)}`;\n\nreturn [{ json: { prompt } }];"
+        "jsCode": "// The Neural Bricklayers head-writer prompt, adapted from the BBN pattern\n// (docs/the_neural_bricklayers.md in the yakyak repo). Sources are X/Twitter\n// timelines via nitter RSS (+ Google News for Hinton, who barely posts).\n// Per-account lookbacks (Musk 3d, others 5d, Hinton 14d) are enforced by the\n// prompt against each item's <pubDate>. One overarching theme per episode;\n// 12 scenes; fixed studio; fixed outfits; co-panelists visible in every shot.\nconst trim = (s) => String(s || '').slice(0, 15000);\nconst src = (label, s) => s ? `--- ${label} ---\\n${s}` : `--- ${label} ---\\n(source unavailable this run — proceed without it)`;\nconst musk = trim(($('Fetch Musk (X)').first().json || {}).data);\nconst altman = trim(($('Fetch Altman (X)').first().json || {}).data);\nconst lecun = trim(($('Fetch LeCun (X)').first().json || {}).data);\nconst karpathy = trim(($('Fetch Karpathy (X)').first().json || {}).data);\nconst hinton = trim(($('Fetch Hinton (news)').first().json || {}).data);\nconst missing = [\n  ['@elonmusk', musk], ['@sama', altman], ['@ylecun', lecun],\n  ['@karpathy', karpathy], ['Hinton news', hinton],\n].filter(([, s]) => !s).map(([n]) => n);\nconst ts = new Date().toISOString();\n\nconst prompt = `You are the head writer for \"The Neural Bricklayers\", a satirical\nshort-form panel-debate show: the five most influential voices in AI, rendered as\nLEGO-style plastic minifigure caricatures, argue on a late-night TV set. The\ndebates are PARODY, but every episode is seeded from things the panelists\nreally posted this week. Your job in this run is to produce ONE episode.\n\nSTEP 1 — Read the source material below (RSS mirrors of each panelist's real\nX/Twitter timeline, plus a news feed for Hinton). Each <item> has a <pubDate>.\nApply these lookback windows from now (now: ${ts}):\n  - Elon Musk: past 3 days only (he posts constantly; older items are stale).\n  - Sam Altman, Yann LeCun, Andrej Karpathy: past 5 days.\n  - Geoffrey Hinton (news feed): past 14 days.\nIgnore items outside the window. Retweets (\"RT by @…\") count as endorsements —\nusable, but prefer the panelist's own words.\n\nSTEP 1b — Fill the gaps with your web tools. ${missing.length ? `These feeds failed to fetch this run: ${missing.join(', ')}.` : `All feeds fetched, but verify anything that smells stale.`} For any panelist with a missing or thin\nfeed, use web_search to find what they REALLY posted or said within their\nlookback window (e.g. \"elonmusk latest posts\", \"site:x.com/sama\", news coverage\nquoting their posts) and web_fetch on promising result URLs. Every position you\nwrite must trace back to something real and current — never invent posts.\n\nSTEP 2 — Find THE CLASH. Cluster the posts by topic and pick the ONE theme with\nthe most heat — the sharpest real disagreement between at least three panelists.\nThat single theme is the episode's spine: every scene must advance it. Pick the\nmost exciting, most controversial defensible reading of what they posted; real\nfriction between the actual posts beats invented drama.\n\nSTEP 3 — Write the episode.\n\nTHE STUDIO (identical in every scene — restate these exact set details, do not\nvary them): The Neural Bricklayers studio, a late-night debate set built\nentirely from toy plastic bricks. A half-circle rounded anchor desk with a\nsmooth GRAY desktop and a BROWN brick base; the floor is medium-gray brick; the\nback wall is a large dark-gray screen showing a faint glowing spiral \"e\" logo;\nbrick studio spotlights hang from a black ceiling rig casting purple-and-teal\nrim light; tiny brick coffee mugs and microphones sit on the desk. Fixed\nseating, left to right: Sam Altman, Yann LeCun, Bob Brikko (center, moderator),\nGeoffrey Hinton, Andrej Karpathy, Elon Musk. Same desk, floor, wall, lighting\nand seats in all 12 scenes.\n\nCAST — fixed outfits (repeat the outfit EVERY time a character appears; never\nchange or omit it):\n  - Bob Brikko (moderator) — rumpled tan trench coat over a white shirt, crooked\n    press badge. Tongue-in-cheek, dry, deadpan under fire.\n  - Sam Altman — plain gray crewneck sweater under an open dark-blue jacket.\n    The Operator: smooth, always announcing, deflects doom with scale.\n  - Yann LeCun — brown tweed blazer, light-blue shirt, thick black rectangular\n    glasses. The Contrarian Scientist: unimpressed, fights billionaires for sport.\n  - Geoffrey Hinton — charcoal suit, slate-gray shirt, autumn-leaf patterned tie,\n    white hair. The Conscience: gentle, wry, quietly terrifying.\n  - Andrej Karpathy — plain dark-charcoal t-shirt, silver laptop under one arm.\n    The Builder: earnest, permanently amazed, the only one who still writes code.\n  - Elon Musk — black tuxedo-style jacket over an open-collar white shirt,\n    tousled hair, smirk. The Accelerant: announces, provokes and memes in one breath.\n\nEPISODE STRUCTURE — exactly 12 scenes. Bob opens and closes; every panelist\nleads EXACTLY TWO scenes:\n  - Scene 1 — Bob Brikko: cold open, names the week's clash.\n  - Scenes 2–6 — first round: each panelist's opening take (one scene each, any\n    order that serves the drama).\n  - Scenes 7–11 — second round: rebuttals and escalation — pair natural enemies\n    back-to-back and let them answer each other (one scene each, any order).\n  - Scene 12 — Bob Brikko: deadpan sign-off that lands the theme.\n\nPER-SCENE REQUIREMENTS:\n  - Roughly 200 words of prose describing the scene's visuals, action and\n    atmosphere, written as a director briefing a camera op. EVERY scene's prose\n    must: (a) open by re-establishing the same studio described above, (b) put\n    the leading character front and center at their fixed seat with their exact\n    fixed outfit, and (c) show AT LEAST TWO other named cast members visibly\n    reacting in the frame (soft focus, at their own fixed seats, in their own\n    fixed outfits — name them and describe their reaction).\n  - Exactly ONE spoken dialog line per scene, 8–12 words, attributed to the\n    scene's leading character. Do NOT end the dialog line with a period\n    (\"!\" or \"?\" are fine).\n  - Leading character must be from the cast. No other characters speak.\n\nTONE: Satirical panel-show comedy with real bite. The heat comes from the\npanelists' REAL public positions pushed to their logical extreme; exaggerate\ndelivery, not facts. No slapstick, no slurs, no fabricated scandals. Punch up,\nnot down.\n\nSTEP 4 — Reply with ONLY the markdown document below — no preamble, no\ntriple-backtick fences, nothing after it:\n\n  # The Neural Bricklayers — Latest Debate\n  **Generated (UTC):** ${ts}\n  **Sources:** X/Twitter timelines (@elonmusk 3d, @sama/@ylecun/@karpathy 5d), Hinton news (14d)\n\n  ## Social title: <a short summarizing title, about 4-7 words, 50 characters MAX so social networks do not crop it>\n\n  ## Theme: <one sentence naming the episode's single overarching clash>\n\n  ## Tweets referenced:\n  - <Panelist full name>: \"<the real tweet text, or a tight one-line paraphrase of the real post/report you used>\"\n  (ORDER these bullets by impact — the most consequential / most-engaged / most-controversial tweet FIRST. Include EVERY tweet you actually drew from, and make sure EVERY one of the five panelists appears at least once — if a panelist barely posted, include their single most notable line so no one is missing.)\n\n  ## Scene 1 — <short title>\n  **Leading character:** Bob Brikko\n  **Dialog:** \"<8–12 word line>\"\n\n  <~200 words of scene prose>\n\n  ... (continue through Scene 12, which is again Bob Brikko) ...\n\n===== SOURCE MATERIAL =====\n\n${src('@elonmusk (nitter RSS)', musk)}\n\n${src('@sama (nitter RSS)', altman)}\n\n${src('@ylecun (nitter RSS)', lecun)}\n\n${src('@karpathy (nitter RSS)', karpathy)}\n\n${src('Geoffrey Hinton (Google News RSS)', hinton)}`;\n\nreturn [{ json: { prompt } }];"
       }
     },
     {
@@ -167,9 +167,9 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ { model: 'claude-opus-4-8', max_tokens: 16000, thinking: { type: 'adaptive' }, messages: [ { role: 'user', content: $json.prompt } ] } }}",
+        "jsonBody": "={{ { model: 'claude-opus-4-8', max_tokens: 16000, thinking: { type: 'adaptive' }, tools: [ { type: 'web_search_20260209', name: 'web_search', max_uses: 4 }, { type: 'web_fetch_20260209', name: 'web_fetch', max_uses: 3 } ], messages: [ { role: 'user', content: $json.prompt } ] } }}",
         "options": {
-          "timeout": 600000
+          "timeout": 1500000
         },
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth"
@@ -179,7 +179,10 @@
         "httpHeaderAuth": {
           "name": "Anthropic API key"
         }
-      }
+      },
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 15000
     },
     {
       "id": "storyPayload",
@@ -192,7 +195,7 @@
       ],
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "// Extract the story markdown from the Claude response, then port of\n// storyToDescription() from show/showrunner/story-format.js: drop everything\n// before the first '## Scene', collapse each scene's prose to one line, append\n// `<Char> says: \"<dialog>\"`, mapping names through the cast map (CAST_ALIASES\n// in show.env — both Mojtaba and Khamenei collapse to the Mojtaba character).\nconst resp = $json;\nif (resp.stop_reason === 'refusal') throw new Error('Claude declined the request (stop_reason: refusal)');\nconst story = (resp.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\\n');\nif (!/## Scene/.test(story)) throw new Error('Claude response contains no \"## Scene\" blocks — not a story');\n\n// ≤50-char social title from the requested '## Social title:' line\nlet socialTitle = '';\nconst mTitle = story.match(/^##\\s*Social title:\\s*(.+)$/mi);\nif (mTitle) socialTitle = [...mTitle[1].trim().replace(/^\"|\"$/g, '')].slice(0, 50).join('');\n\n// caption from the theme line + posts bullets\nconst capLines = [];\nconst tm = story.match(/^##\\s*Theme:\\s*(.+)$/mi);\nif (tm) capLines.push(tm[1].trim());\nconst hm = story.match(/## Posts we drew from:\\n([\\s\\S]*?)\\n##/);\nif (hm) for (const l of hm[1].split('\\n')) { const t = l.replace(/^-\\s*/, '').trim(); if (t) capLines.push(t); }\nconst socialCaption = capLines.slice(0, 6).join(' · ').slice(0, 400);\n\nconst ALIASES = { Bob: 'Bob Brikko', Brikko: 'Bob Brikko', Altman: 'Sam Altman', LeCun: 'Yann LeCun', Hinton: 'Geoffrey Hinton', Karpathy: 'Andrej Karpathy', Musk: 'Elon Musk' };\nconst mapShort = (name) => { for (const k of Object.keys(ALIASES)) if (name.includes(k)) return ALIASES[k]; return String(name).trim(); };\n\nconst lines = story.split(/\\r?\\n/);\nlet inScene = false, n = 0, prose = '', character = '', dialog = '';\nconst parts = [];\nconst emit = () => {\n  if (!inScene) return;\n  const p = prose.replace(/[ \\t]+/g, ' ').trim();\n  const s = mapShort(character);\n  parts.push(n === 0 ? `- ${p} ${s} says: \"${dialog}\"` : `\\n\\n  - ${p} ${s} says: \"${dialog}\"`);\n  n++;\n};\nfor (const line of lines) {\n  if (/^## Scene/.test(line)) { emit(); inScene = true; prose = ''; character = ''; dialog = ''; continue; }\n  if (!inScene) continue;\n  if (/^\\*\\*Leading character:\\*\\*/.test(line)) { character = line.replace(/^\\*\\*Leading character:\\*\\*[ \\t]*/, ''); continue; }\n  if (/^\\*\\*Dialog:\\*\\*/.test(line)) { dialog = line.replace(/^\\*\\*Dialog:\\*\\*[ \\t]*/, '').trim().replace(/^\"|\"$/g, '').replace(/\\.$/, ''); continue; }\n  if (/^##/.test(line)) { emit(); inScene = false; continue; }\n  prose += ' ' + line;\n}\nemit();\nif (!parts.length) throw new Error('no scenes parsed from the story');\nif (n !== 12) console.warn(`expected 12 scenes (Bob x2 + five panelists x2), parsed ${n} — proceeding`);\nconst plot = parts.join('');\nreturn [{ json: { plot, socialTitle, socialCaption, scenes: n, story } }];"
+        "jsCode": "// Extract the story markdown from the Claude response, then port of\n// storyToDescription() from show/showrunner/story-format.js: drop everything\n// before the first '## Scene', collapse each scene's prose to one line, append\n// `<Char> says: \"<dialog>\"`, mapping names through the cast map (CAST_ALIASES\n// in show.env — both Mojtaba and Khamenei collapse to the Mojtaba character).\nconst resp = $json;\nif (resp.stop_reason === 'pause_turn') throw new Error('Claude paused mid-research (server tool-loop limit) — re-run, or lower the web tools max_uses');\nif (resp.stop_reason === 'refusal') throw new Error('Claude declined the request (stop_reason: refusal)');\nconst story = (resp.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\\n');\nif (!/## Scene/.test(story)) throw new Error('Claude response contains no \"## Scene\" blocks — not a story');\n\n// ≤50-char social title from the requested '## Social title:' line\nlet socialTitle = '';\nconst mTitle = story.match(/^##\\s*Social title:\\s*(.+)$/mi);\nif (mTitle) socialTitle = [...mTitle[1].trim().replace(/^\"|\"$/g, '')].slice(0, 50).join('');\n\n// caption: theme line, then every referenced tweet (attributed, impact order)\nconst tweetLines = [];\nconst tm = story.match(/^##\\s*Theme:\\s*(.+)$/mi);\nconst themeLine = tm ? tm[1].trim() : '';\nconst hm = story.match(/## Tweets referenced:[^\\n]*\\n([\\s\\S]*?)(?:\\n##|\\n\\s*\\(ORDER)/);\nif (hm) for (const l of hm[1].split('\\n')) {\n  const t = l.replace(/^[-*]\\s*/, '').trim();\n  // keep only attributed bullet lines (\"Name: ...\"), skip the parenthetical note\n  if (t && /^[^:]{2,40}:/.test(t) && !/^\\(/.test(t)) tweetLines.push(t);\n}\nconst socialCaption = [themeLine, tweetLines.length ? '\\nTweets referenced:' : '', ...tweetLines.map(t => '\\u2022 ' + t)]\n  .filter(Boolean).join('\\n').slice(0, 1800);\n\nconst ALIASES = { Bob: 'Bob Brikko', Brikko: 'Bob Brikko', Altman: 'Sam Altman', LeCun: 'Yann LeCun', Hinton: 'Geoffrey Hinton', Karpathy: 'Andrej Karpathy', Musk: 'Elon Musk' };\nconst mapShort = (name) => { for (const k of Object.keys(ALIASES)) if (name.includes(k)) return ALIASES[k]; return String(name).trim(); };\n\nconst lines = story.split(/\\r?\\n/);\nlet inScene = false, n = 0, prose = '', character = '', dialog = '';\nconst parts = [];\nconst emit = () => {\n  if (!inScene) return;\n  const p = prose.replace(/[ \\t]+/g, ' ').trim();\n  const s = mapShort(character);\n  parts.push(n === 0 ? `- ${p} ${s} says: \"${dialog}\"` : `\\n\\n  - ${p} ${s} says: \"${dialog}\"`);\n  n++;\n};\nfor (const line of lines) {\n  if (/^## Scene/.test(line)) { emit(); inScene = true; prose = ''; character = ''; dialog = ''; continue; }\n  if (!inScene) continue;\n  if (/^\\*\\*Leading character:\\*\\*/.test(line)) { character = line.replace(/^\\*\\*Leading character:\\*\\*[ \\t]*/, ''); continue; }\n  if (/^\\*\\*Dialog:\\*\\*/.test(line)) { dialog = line.replace(/^\\*\\*Dialog:\\*\\*[ \\t]*/, '').trim().replace(/^\"|\"$/g, '').replace(/\\.$/, ''); continue; }\n  if (/^##/.test(line)) { emit(); inScene = false; continue; }\n  prose += ' ' + line;\n}\nemit();\nif (!parts.length) throw new Error('no scenes parsed from the story');\nif (n !== 12) console.warn(`expected 12 scenes (Bob x2 + five panelists x2), parsed ${n} — proceeding`);\nconst plot = parts.join('');\nreturn [{ json: { plot, socialTitle, socialCaption, scenes: n, story } }];"
       },
       "notes": "The story markdown is preserved on this node's output — n8n's execution log is the story archive (the showrunner's stories/ equivalent)."
     },
@@ -338,7 +341,7 @@
     {
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "// Shape the engine call: episode mode in the pinned BBN campaign, the story\n// as the new episode's plot, optional soundtrack pin. The engine's sub-workflow\n// trigger is passthrough — this item IS the payload (same shape as the engine\n// webhook's body). Re-delivered same-day stories are diff-aware on the engine\n// side, so a duplicate run doesn't re-bill unchanged work.\nconst cfg = $('Show config').first().json;\nif (!cfg.campaignId) throw new Error('Show config: campaignId is empty');\nconst movie = { plot: $json.plot };\nif (cfg.soundtrackAudioPath) {\n  movie.soundtrackAudioPath = cfg.soundtrackAudioPath;\n  if (cfg.soundtrackVolume) movie.soundtrackVolume = Number(cfg.soundtrackVolume);\n}\nreturn [{ json: { target: { mode: 'episode', campaignId: cfg.campaignId }, changes: { movie }, chatWebhookUrl: '' } }];"
+        "jsCode": "// Shape the engine call: episode mode in the pinned BBN campaign, the story\n// as the new episode's plot, optional soundtrack pin. The engine's sub-workflow\n// trigger is passthrough — this item IS the payload (same shape as the engine\n// webhook's body). Re-delivered same-day stories are diff-aware on the engine\n// side, so a duplicate run doesn't re-bill unchanged work.\nconst cfg = $('Show config').first().json;\nif (!cfg.campaignId) throw new Error('Show config: campaignId is empty');\nconst movie = { plot: $json.plot };\nif (cfg.soundtrackAudioPath) {\n  movie.soundtrackAudioPath = cfg.soundtrackAudioPath;\n  if (cfg.soundtrackVolume) movie.soundtrackVolume = Number(cfg.soundtrackVolume);\n}\nreturn [{ json: { target: { mode: 'episode', campaignId: cfg.campaignId }, changes: { movie }, apiBase: cfg.apiBase || '', userId: cfg.userId || '', chatWebhookUrl: '' } }];"
       },
       "id": "885fe683-c0d1-4e09-b946-c9239593ea10",
       "name": "Build engine payload",
@@ -390,9 +393,21 @@
               "responseFormat": "text"
             }
           }
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+            }
+          ]
         }
       },
-      "notes": "Nitter RSS mirror of @elonmusk. 3-day lookback is applied in Build prompt."
+      "notes": "Nitter RSS mirror of @elonmusk. 3-day lookback is applied in Build prompt.",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000
     },
     {
       "id": "fetchCnn",
@@ -414,9 +429,21 @@
               "responseFormat": "text"
             }
           }
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+            }
+          ]
         }
       },
-      "notes": "Nitter RSS mirror of @sama. 5-day lookback is applied in Build prompt."
+      "notes": "Nitter RSS mirror of @sama. 5-day lookback is applied in Build prompt.",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000
     },
     {
       "id": "fetchAj",
@@ -438,8 +465,20 @@
               "responseFormat": "text"
             }
           }
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+            }
+          ]
         }
       },
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000,
       "notes": "Nitter RSS mirror of @ylecun. 5-day lookback is applied in Build prompt."
     },
     {
@@ -462,8 +501,20 @@
               "responseFormat": "text"
             }
           }
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+            }
+          ]
         }
       },
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000,
       "notes": "Nitter RSS mirror of @karpathy. 5-day lookback is applied in Build prompt."
     },
     {
@@ -486,8 +537,20 @@
               "responseFormat": "text"
             }
           }
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+            }
+          ]
         }
       },
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000,
       "notes": "Hinton barely posts on X — Google News RSS (14-day window) covers his interviews/talks instead."
     }
   ],
