@@ -1,0 +1,375 @@
+{
+  "name": "Panel Debate (wizard template) — front-end for the YakYak engine",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "executionTimeout": 3600,
+    "timezone": "{{YY_TZ}}"
+  },
+  "nodes": [
+    {
+      "id": "yakyakDescription",
+      "name": "YakYak Description",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        -176
+      ],
+      "parameters": {
+        "content": "## 📄 YakYak Description — workflow summary (not a step note)\nPanel Debate archetype (wizard-created). Reads the configured sources (X handles and/or URLs, each with its own lookback window) and asks the YakYak AI story-research endpoint to write today's episode — the API compiles the head-writer prompt and does its own web_fetch/web_search, so this workflow holds no Anthropic key and does no scraping itself.",
+        "height": 200,
+        "width": 3200,
+        "color": 4
+      }
+    },
+    {
+      "id": "schedule",
+      "name": "On schedule",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        300
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "{{YY_CRON}}"
+            }
+          ]
+        }
+      },
+      "notes": "Cron + timezone set by the wizard at instantiation time (WS5 create-show). Use 'Test workflow' to fire a run by hand."
+    },
+    {
+      "id": "showConfig",
+      "name": "Show config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        200,
+        300
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "cfg-campaign",
+              "name": "campaignId",
+              "value": "{{YY_CAMPAIGN_ID}}",
+              "type": "string"
+            },
+            {
+              "id": "cfg-user",
+              "name": "userId",
+              "value": "{{YY_USER_ID}}",
+              "type": "string"
+            },
+            {
+              "id": "cfg-sources",
+              "name": "sources",
+              "value": "{{YY_SOURCES_JSON}}",
+              "type": "array"
+            },
+            {
+              "id": "cfg-base",
+              "name": "apiBase",
+              "value": "{{YY_API_BASE}}",
+              "type": "string"
+            },
+            {
+              "id": "cfg-post",
+              "name": "postToSocial",
+              "value": "{{YY_POST_TO_SOCIAL}}",
+              "type": "boolean"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "notes": "ALL per-show config lives here, on the canvas — filled in by the wizard (create-show, WS5) at instantiation time via the {{YY_*}} substitution mechanism (n8n-workflow-import.service.ts). sources is the array of {kind:'x_handle'|'url', value, lookbackDays?} objects from the wizard's Sources step — each panelist's own lookback window travels with their source entry. postToSocial defaults false (review-first, WS9)."
+    },
+    {
+      "id": "writeStoryYakYakAi",
+      "name": "Write story (YakYak AI)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        400,
+        300
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.apiBase }}/ai/research-story",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { templateKey: 'panel_debate', sources: $json.sources, campaignId: $json.campaignId } }}",
+        "options": {
+          "timeout": 600000
+        },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth"
+      },
+      "credentials": {
+        "httpBearerAuth": {
+          "name": "YakYak API"
+        }
+      },
+      "notes": "Same 'YakYak API' Bearer credential as the engine — no Anthropic key on the canvas or in env. The API compiles the Panel Debate head-writer prompt server-side (show-archetypes.ts) from campaignId's showBible + these sources (fixed panel seating/structure, per-source lookback windows), and does its own web_fetch/web_search. Timeout 600s (10min)."
+    },
+    {
+      "id": "storyPayload",
+      "name": "Build story payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2200,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// /ai/research-story already returns plot (converted scene bullets via\n// the server-side storyToDescription() port, WS1.2), socialTitle, and\n// socialCaption — no markdown parsing needed here anymore (that used to\n// happen in this node; it's now server-side, shared with the wizard's\n// Show Bible / manual-prompt paths).\nconst resp = $json;\nif (!resp.plot) throw new Error('ai/research-story returned no plot — ' + (resp.message || 'unknown error'));\nreturn [{ json: { plot: resp.plot, socialTitle: resp.socialTitle || '', socialCaption: resp.socialCaption || '' } }];"
+      },
+      "notes": "Thin passthrough — see Write story (YakYak AI)'s notes for where the real conversion happens now."
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Shape the engine call: episode mode in the wizard-configured campaign, the story\n// as the new episode's plot, optional soundtrack pin. The engine's sub-workflow\n// trigger is passthrough — this item IS the payload (same shape as the engine\n// webhook's body). Re-delivered same-day stories are diff-aware on the engine\n// side, so a duplicate run doesn't re-bill unchanged work.\nconst cfg = $('Show config').first().json;\nif (!cfg.campaignId) throw new Error('Show config: campaignId is empty');\nconst movie = { plot: $json.plot };\nif (cfg.soundtrackAudioPath) {\n  movie.soundtrackAudioPath = cfg.soundtrackAudioPath;\n  if (cfg.soundtrackVolume) movie.soundtrackVolume = Number(cfg.soundtrackVolume);\n}\nreturn [{ json: { target: { mode: 'episode', campaignId: cfg.campaignId }, changes: { movie }, apiBase: cfg.apiBase || '', userId: cfg.userId || '', chatWebhookUrl: '' } }];"
+      },
+      "id": "885fe683-c0d1-4e09-b946-c9239593ea10",
+      "name": "Build engine payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1000,
+        300
+      ]
+    },
+    {
+      "id": "callEngine",
+      "name": "Call engine",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        1200,
+        300
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000,
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "",
+          "cachedResultName": "YakYak engine — resolve target, patch or new episode, render, post"
+        },
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "notes": "Fires the generic YakYak engine in episode mode. Timeout 45 min — the engine only responds once the episode is generated AND rendered. Retry is safe: a re-run lands on the same unrendered slot."
+    },
+    {
+      "id": "setSocial",
+      "name": "Set social fields",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1400,
+        300
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Show config').first().json.apiBase }}/workflow/update-movie-social-description",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ Object.assign({ movieId: $json.movieId }, $('Build story payload').first().json.socialTitle ? { socialTitle: $('Build story payload').first().json.socialTitle } : {}, $('Build story payload').first().json.socialCaption ? { socialDescription: $('Build story payload').first().json.socialCaption } : {}) }}",
+        "options": {},
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth"
+      },
+      "notes": "Showrunner parity: ≤50-char social title (from the story call) + headline-derived caption. onError=continue — cosmetic metadata must not kill a rendered episode.",
+      "credentials": {
+        "httpBearerAuth": {
+          "name": "YakYak API"
+        }
+      }
+    },
+    {
+      "id": "fetchLinks",
+      "name": "Fetch campaign links",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1600,
+        300
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $('Show config').first().json.apiBase }}/social/campaign-links/{{ $('Show config').first().json.campaignId }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "credentials": {
+        "httpBearerAuth": {
+          "name": "YakYak API"
+        }
+      },
+      "notes": "The campaign's linked social networks — GET /social/campaign-links. Read-only, so it runs regardless; the postToSocial gate is applied in Build post list. onError=continue so Build post list can report a clear error."
+    },
+    {
+      "id": "buildPostList",
+      "name": "Build post list",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1800,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// When postToSocial is true, publishes to every network linked to the\n// campaign — one /social/post-movie call per campaign link.\n// The gate lives in Show config (postToSocial); set it false for review-first\n// runs. Zero items out (gate off, or no networks linked) = the posting node\n// simply doesn't fire, and the run stays green.\nconst cfg = $('Show config').first().json;\nif (!cfg.postToSocial) return [];\nconst resp = $('Fetch campaign links').first().json || {};\nif (!Array.isArray(resp.campaignLinks)) throw new Error('could not list campaign links for social posting (' + (resp.error?.message || 'no campaignLinks in response') + ') — check the \"YakYak API\" credential has the social_publishing scope, or set Show config postToSocial=false');\nconst movieId = $('Call engine').first().json.movieId;\nreturn resp.campaignLinks.filter((r) => r.connectedNetworkId).map((r) => ({ json: { movieId, connectedNetworkId: r.connectedNetworkId, socialNetworkName: r.socialNetworkName || '' } }));"
+      },
+      "notes": "One item per linked network. Linking networks to the campaign is a one-time manual step (yakyak.ai profile, or course/08-social-post) — with none linked, this emits zero items and the run still succeeds."
+    },
+    {
+      "id": "postToSocials",
+      "name": "Post to socials",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2000,
+        300
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Show config').first().json.apiBase }}/social/post-movie/{{ $json.movieId }}/{{ $json.connectedNetworkId }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "credentials": {
+        "httpBearerAuth": {
+          "name": "YakYak API"
+        }
+      },
+      "notes": "POST /social/post-movie/{movieId}/{connectedNetworkId}, empty body — runs once per item, i.e. once per linked network. IRREVERSIBLE. onError=continue mirrors the showrunner: a per-network 4xx (mis-configured account etc.) must not fail the other networks or the run. Needs the social_publishing scope on the PAT."
+    }
+  ],
+  "connections": {
+    "On schedule": {
+      "main": [
+        [
+          {
+            "node": "Show config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Show config": {
+      "main": [
+        [
+          {
+            "node": "Write story (YakYak AI)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write story (YakYak AI)": {
+      "main": [
+        [
+          {
+            "node": "Build story payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build story payload": {
+      "main": [
+        [
+          {
+            "node": "Build engine payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build engine payload": {
+      "main": [
+        [
+          {
+            "node": "Call engine",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call engine": {
+      "main": [
+        [
+          {
+            "node": "Set social fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set social fields": {
+      "main": [
+        [
+          {
+            "node": "Fetch campaign links",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch campaign links": {
+      "main": [
+        [
+          {
+            "node": "Build post list",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build post list": {
+      "main": [
+        [
+          {
+            "node": "Post to socials",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}

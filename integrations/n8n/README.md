@@ -44,6 +44,33 @@ change + render from any external event.
 
   The two **Computed** shows need no Anthropic credential at all — Cosmic Brief is the
   recommended first import to prove the engine wiring.
+- **Wizard templates, `{{YY_*}}` placeholders** — `workflow.tpl-news-desk.json` and
+  `workflow.tpl-panel-debate.json` are the two archetypes the YakYak show.yakyak.ai
+  wizard (v3, `docs/yakyak_v3.md` in the `yakyak` repo) instantiates per user. Unlike
+  the shows above, they hold **no Anthropic credential and do no scraping of their
+  own** — a single `POST {apiBase}/ai/research-story` node asks the YakYak API to
+  compile the head-writer prompt (from the campaign's Show Bible cast/tone) and do its
+  own `web_fetch`/`web_search`. Never import these two directly — the wizard's
+  `instantiateTemplate` (`api/src/modules/automation/n8n-workflow-import.service.ts`)
+  fetches them from a **pinned commit** (`N8nRecipe.workflowRef`, seeded by
+  `seed-wizard-templates.ts`) and substitutes every `{{YY_*}}` token with a real,
+  per-account value **before** the JSON is ever uploaded to n8n:
+
+  | Token | Type after substitution | Source |
+  |---|---|---|
+  | `{{YY_CAMPAIGN_ID}}` | string | the wizard-created campaign |
+  | `{{YY_USER_ID}}` | string | the owning YakYak user |
+  | `{{YY_SOURCES_JSON}}` | array of `{kind, value, lookbackDays?}` | the wizard's Sources step |
+  | `{{YY_API_BASE}}` | string | `https://api.yakyak.ai` (or the beta origin) |
+  | `{{YY_POST_TO_SOCIAL}}` | boolean | `false` by default (review-first, WS9) |
+  | `{{YY_CRON}}` | string, embedded in the schedule trigger's cron expression | the wizard's cadence step |
+  | `{{YY_TZ}}` | string, embedded in `settings.timezone` | the wizard's cadence step |
+
+  A token that is the **entire** value of a JSON field (e.g. `sources`) is replaced
+  with its real typed value (array/boolean/etc); a token **embedded in a longer
+  string** (the cron expression, a URL) gets a plain string-replace instead — this
+  avoids JSON-escaping bugs entirely. If you add a new `{{YY_*}}` token, keep both
+  substitution kinds in mind in `n8n-workflow-import.service.ts`.
 - **[`regen-from-template.mjs`](./regen-from-template.mjs)** — a zero-dependency Node script
   that runs the engine's flow from a terminal. Use it to prove your token, template, and
   account before wiring nodes.
