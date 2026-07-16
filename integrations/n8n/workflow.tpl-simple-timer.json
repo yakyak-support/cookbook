@@ -1,0 +1,132 @@
+{
+  "name": "YakYak Campaign Timer (template)",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "executionTimeout": 3600,
+    "timezone": "{{YY_TZ}}"
+  },
+  "nodes": [
+    {
+      "id": "yakyakDescription",
+      "name": "YakYak Description",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        -176
+      ],
+      "parameters": {
+        "content": "## Campaign Timer\nFires the campaign's scheduled premiere tick. Frequency is edited from the YakYak dashboard Timer panel, which rewrites this cron — manual edits here will be overwritten.",
+        "height": 200,
+        "width": 1200,
+        "color": 4
+      }
+    },
+    {
+      "id": "schedule",
+      "name": "On schedule",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        300
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "{{YY_CRON}}"
+            }
+          ]
+        }
+      },
+      "notes": "Cron + timezone rewritten by the YakYak dashboard Timer panel whenever the frequency changes. Use 'Test workflow' to fire a run by hand."
+    },
+    {
+      "id": "timerConfig",
+      "name": "Timer config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        200,
+        300
+      ],
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "cfg-campaign",
+              "name": "campaignId",
+              "value": "{{YY_CAMPAIGN_ID}}",
+              "type": "string"
+            },
+            {
+              "id": "cfg-base",
+              "name": "apiBase",
+              "value": "{{YY_API_BASE}}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "notes": "Filled in by the wizard/import service at instantiation time via the {{YY_*}} substitution mechanism (n8n-workflow-import.service.ts)."
+    },
+    {
+      "id": "premiereTick",
+      "name": "Premiere tick",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        400,
+        300
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.apiBase }}/scheduler/tick",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { campaignId: $json.campaignId } }}",
+        "options": {
+          "timeout": 600000
+        },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth"
+      },
+      "credentials": {
+        "httpBearerAuth": {
+          "name": "YakYak API"
+        }
+      },
+      "notes": "Gates (subscription/tokens/quota) run server-side in SchedulerService.tick — this node only fires the tick. Timeout 600s (10min)."
+    }
+  ],
+  "connections": {
+    "On schedule": {
+      "main": [
+        [
+          {
+            "node": "Timer config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Timer config": {
+      "main": [
+        [
+          {
+            "node": "Premiere tick",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}
