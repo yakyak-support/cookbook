@@ -110,7 +110,7 @@
         "specifyBody": "json",
         "jsonBody": "={{ { templateKey: 'news_desk', sources: $json.sources, campaignId: $json.campaignId } }}",
         "options": {
-          "timeout": 600000
+          "timeout": 1800000
         },
         "authentication": "genericCredentialType",
         "genericAuthType": "httpBearerAuth"
@@ -120,7 +120,7 @@
           "name": "YakYak API"
         }
       },
-      "notes": "Same 'YakYak API' Bearer credential as the engine — no Anthropic key on the canvas or in env. The API compiles the News Desk head-writer prompt server-side (show-archetypes.ts) from campaignId's showBible + these sources, and does its own web_fetch/web_search — this workflow never fetches the news sources itself. Timeout 600s (10min) for the research run."
+      "notes": "Same 'YakYak API' Bearer credential as the engine — no Anthropic key on the canvas or in env. The API compiles the News Desk head-writer prompt server-side (show-archetypes.ts) from campaignId's showBible + these sources, and does its own web_fetch/web_search — this workflow never fetches the news sources itself. Timeout 1800s (30min) for the research run — raised from 600s (10min) 2026-07-16 after beta accounts dan.nighthawk117/lundin4118 saw real research calls up to ~14min, exceeding the old ceiling and stranding the downstream Call engine node."
     },
     {
       "id": "storyPayload",
